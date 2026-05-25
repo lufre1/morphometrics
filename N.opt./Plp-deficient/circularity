@@ -1,0 +1,447 @@
+# ============================================================
+# MITOCHONDRIAL CIRCULARITY ANALYSIS (AXON-LEVEL AGGREGATION)
+# + STATISTICS: GEE + MANN-WHITNEY U TEST
+# + ORIGINAL PLOT DESIGN PRESERVED
+# + PLOT SIGNIFICANCE ANNOTATION BASED ON GEE P-VALUE
+# + TABLES SAVED IN table/
+# + FIGURE SAVED AS PDF IN Plots/
+# ============================================================
+
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from scipy.stats import mannwhitneyu
+
+from statsmodels.genmod.generalized_estimating_equations import GEE
+from statsmodels.genmod.cov_struct import Exchangeable
+from statsmodels.genmod.families import Gaussian
+
+
+# ------------------------------------------------------------
+# (1) SETTINGS
+# ------------------------------------------------------------
+file_name = "nopt-mito-circ.xlsx"
+
+group_col = "mouse_id"
+rawfile_col = "raw_file"
+axon_col = "axon_id"
+axon_uid_col = "axon_uid"
+value_col = "circularity"
+
+group_labels = ["WT", r"$\mathit{Plp}^{-/y}$"]
+y_label = "Mitochondrial circularity"
+plot_title = "Mitochondrial circularity"
+
+y_max = 1.05
+bracket_y = 1.02
+bracket_h = 0.03
+
+WT_COLOR = "#1b9e77"
+KO_COLOR = "#fc8d62"
+
+table_dir = "table"
+plot_dir = "Plots"
+
+os.makedirs(table_dir, exist_ok=True)
+os.makedirs(plot_dir, exist_ok=True)
+
+
+# ------------------------------------------------------------
+# (2) LOAD DATA
+# ------------------------------------------------------------
+df = pd.read_excel(file_name)
+
+print("\n==================== RAW DATA ====================")
+print("Columns:", df.columns.tolist())
+
+required_cols = ["genotype", group_col, rawfile_col, axon_col, value_col]
+missing = [c for c in required_cols if c not in df.columns]
+
+if missing:
+    raise ValueError(f"Missing columns: {missing}")
+
+
+# ------------------------------------------------------------
+# (3) CLEAN DATA
+# ------------------------------------------------------------
+df["genotype"] = df["genotype"].astype(str).str.strip().str.lower()
+df[group_col] = df[group_col].astype(str).str.strip()
+df[rawfile_col] = df[rawfile_col].astype(str).str.strip()
+df[axon_col] = df[axon_col].astype(str).str.strip()
+
+df = df[df["genotype"].isin(["wt", "ko"])].copy()
+
+if not pd.api.types.is_numeric_dtype(df[value_col]):
+    df[value_col] = (
+        df[value_col]
+        .astype(str)
+        .str.replace(",", ".", regex=False)
+    )
+
+df[value_col] = pd.to_numeric(df[value_col], errors="coerce")
+
+df = df.dropna(
+    subset=["genotype", group_col, rawfile_col, axon_col, value_col]
+).copy()
+
+df["genotype_ko"] = (df["genotype"] == "ko").astype(int)
+
+# Create a unique axon ID across all images.
+df[axon_uid_col] = (
+    df[rawfile_col].astype(str).str.strip()
+    + "__axon_"
+    + df[axon_col].astype(str).str.strip()
+)
+
+print("\n==================== MITO-LEVEL SUMMARY (CIRCULARITY) ====================")
+print(df[value_col].describe())
+
+print("\nUnique mice per genotype:")
+print(df.groupby("genotype")[group_col].nunique())
+
+print("\nUnique raw files per genotype:")
+print(df.groupby("genotype")[rawfile_col].nunique())
+
+print("\nUnique combined axons per genotype:")
+print(df.groupby("genotype")[axon_uid_col].nunique())
+
+print("\nUnique combined axons per mouse:")
+print(df.groupby(group_col)[axon_uid_col].nunique().describe())
+
+
+# ------------------------------------------------------------
+# (4) AGGREGATE TO AXON LEVEL
+# ------------------------------------------------------------
+# For each unique axon, the median mitochondrial circularity is calculated.
+# This respects the hierarchy mitochondrion -> axon -> mouse.
+axon_df = (
+    df.groupby(["genotype", group_col, axon_uid_col], as_index=False)
+      .agg(
+          axon_median_circularity=(value_col, "median"),
+          axon_mean_circularity=(value_col, "mean"),
+          n_mito=(value_col, "size")
+      )
+)
+
+axon_df["genotype_ko"] = (axon_df["genotype"] == "ko").astype(int)
+
+print("\n==================== AXON-LEVEL SUMMARY ====================")
+print(axon_df["axon_median_circularity"].describe())
+
+
+# ------------------------------------------------------------
+# (5) MOUSE LEVEL FROM AXON-LEVEL DATA
+# ------------------------------------------------------------
+mouse_df = (
+    axon_df.groupby(["genotype", group_col], as_index=False)
+           .agg(
+               value_median=("axon_median_circularity", "median"),
+               value_mean=("axon_median_circularity", "mean"),
+               value_sd=("axon_median_circularity", "std"),
+               n_axons=("axon_median_circularity", "size")
+           )
+)
+
+wt_axons = axon_df.loc[
+    axon_df["genotype"] == "wt", "axon_median_circularity"
+].dropna().astype(float).values
+
+ko_axons = axon_df.loc[
+    axon_df["genotype"] == "ko", "axon_median_circularity"
+].dropna().astype(float).values
+
+wt_mouse = mouse_df.loc[
+    mouse_df["genotype"] == "wt", "value_median"
+].dropna().astype(float).values
+
+ko_mouse = mouse_df.loc[
+    mouse_df["genotype"] == "ko", "value_median"
+].dropna().astype(float).values
+
+n_wt_axons = len(wt_axons)
+n_ko_axons = len(ko_axons)
+n_wt_mice = len(wt_mouse)
+n_ko_mice = len(ko_mouse)
+
+wt_mouse_mean = np.mean(wt_mouse) if len(wt_mouse) > 0 else np.nan
+wt_mouse_sd = np.std(wt_mouse, ddof=1) if len(wt_mouse) > 1 else np.nan
+ko_mouse_mean = np.mean(ko_mouse) if len(ko_mouse) > 0 else np.nan
+ko_mouse_sd = np.std(ko_mouse, ddof=1) if len(ko_mouse) > 1 else np.nan
+
+wt_mouse_median_of_medians = np.median(wt_mouse) if len(wt_mouse) > 0 else np.nan
+ko_mouse_median_of_medians = np.median(ko_mouse) if len(ko_mouse) > 0 else np.nan
+
+
+# ------------------------------------------------------------
+# (6) HELPER FUNCTIONS
+# ------------------------------------------------------------
+def stars(p):
+    """
+    Convert a p-value into a standard significance label.
+    """
+    if not np.isfinite(p):
+        return "ns"
+    if p < 0.0001:
+        return "****"
+    if p < 0.001:
+        return "***"
+    if p < 0.01:
+        return "**"
+    if p < 0.05:
+        return "*"
+    return "ns"
+
+
+def fmt_mean_sd(mean_val, sd_val, decimals=3):
+    """
+    Format mean ± SD values for readable summary tables.
+    """
+    if np.isnan(mean_val):
+        return "nan"
+    if np.isnan(sd_val):
+        return f"{mean_val:.{decimals}f} ± n/a"
+    return f"{mean_val:.{decimals}f} ± {sd_val:.{decimals}f}"
+
+
+# ------------------------------------------------------------
+# (7) GEE ANALYSIS ON AXON-LEVEL DATA
+# ------------------------------------------------------------
+print("\n==================== GEE ANALYSIS (AXON LEVEL) ====================")
+
+formula = "axon_median_circularity ~ genotype_ko"
+
+gee_model = GEE.from_formula(
+    formula,
+    groups=group_col,
+    cov_struct=Exchangeable(),
+    family=Gaussian(),
+    data=axon_df
+)
+
+gee_result = gee_model.fit()
+
+print(gee_result.summary())
+
+gee_effect = gee_result.params["genotype_ko"]
+gee_p = gee_result.pvalues["genotype_ko"]
+gee_ci_low, gee_ci_high = gee_result.conf_int().loc["genotype_ko"]
+gee_sig = stars(gee_p)
+
+
+# ------------------------------------------------------------
+# (8) MANN-WHITNEY U TEST ON MOUSE-LEVEL MEDIANS
+# ------------------------------------------------------------
+print("\n==================== MANN-WHITNEY U TEST ====================")
+
+if len(wt_mouse) > 0 and len(ko_mouse) > 0:
+    mw_result = mannwhitneyu(
+        wt_mouse,
+        ko_mouse,
+        alternative="two-sided"
+    )
+    mw_u = mw_result.statistic
+    mw_p = mw_result.pvalue
+else:
+    mw_u = np.nan
+    mw_p = np.nan
+
+mw_sig = stars(mw_p)
+
+print(f"Mann-Whitney U statistic: {mw_u}")
+print(f"Mann-Whitney U p-value: {mw_p}")
+print(f"Mann-Whitney U significance label: {mw_sig}")
+
+
+# ------------------------------------------------------------
+# (9) SUMMARY TABLES
+# ------------------------------------------------------------
+summary_table = pd.DataFrame({
+    "Genotype": ["WT", "KO"],
+    "n_mice": [n_wt_mice, n_ko_mice],
+    "n_axons": [n_wt_axons, n_ko_axons],
+    "Mean_of_mouse_medians": [wt_mouse_mean, ko_mouse_mean],
+    "SD_of_mouse_medians": [wt_mouse_sd, ko_mouse_sd],
+    "Mean ± SD of mouse medians": [
+        fmt_mean_sd(wt_mouse_mean, wt_mouse_sd),
+        fmt_mean_sd(ko_mouse_mean, ko_mouse_sd)
+    ],
+    "Median_of_mouse_medians": [
+        wt_mouse_median_of_medians,
+        ko_mouse_median_of_medians
+    ]
+})
+
+statistics_table = pd.DataFrame({
+    "Outcome": ["axon_median_circularity"],
+    "GEE_effect_KO_vs_WT": [gee_effect],
+    "GEE_CI_low": [gee_ci_low],
+    "GEE_CI_high": [gee_ci_high],
+    "GEE_p_value": [gee_p],
+    "GEE_significance": [gee_sig],
+    "Mann_Whitney_U": [mw_u],
+    "Mann_Whitney_p_value": [mw_p],
+    "Mann_Whitney_significance": [mw_sig],
+    "p_value_used_for_plot": [gee_p],
+    "significance_used_for_plot": [gee_sig],
+    "plot_p_source": ["GEE"]
+})
+
+summary_table_path = os.path.join(table_dir, "nopt_circularity_axonlevel_summary_table_groups.csv")
+statistics_table_path = os.path.join(table_dir, "nopt_circularity_axonlevel_statistics_table.csv")
+axon_table_path = os.path.join(table_dir, "nopt_circularity_axonlevel_table.csv")
+mouse_table_path = os.path.join(table_dir, "nopt_circularity_axonlevel_mouse_table.csv")
+
+summary_table.to_csv(summary_table_path, index=False)
+statistics_table.to_csv(statistics_table_path, index=False)
+axon_df.to_csv(axon_table_path, index=False)
+mouse_df.to_csv(mouse_table_path, index=False)
+
+
+# ------------------------------------------------------------
+# (10) PLOT — ORIGINAL DESIGN PRESERVED
+# ------------------------------------------------------------
+fig, ax = plt.subplots(figsize=(5.0, 5.6))
+
+data = [wt_axons, ko_axons]
+
+parts = ax.violinplot(
+    data,
+    positions=[0, 1],
+    showmeans=False,
+    showmedians=False,
+    showextrema=False,
+    widths=0.6,
+    bw_method=0.3,
+    points=200
+)
+
+for i, pc in enumerate(parts["bodies"]):
+    color = WT_COLOR if i == 0 else KO_COLOR
+    pc.set_facecolor(color)
+    pc.set_alpha(0.35)
+    pc.set_edgecolor("black")
+    pc.set_linewidth(1.0)
+
+box = ax.boxplot(
+    data,
+    positions=[0, 1],
+    widths=0.18,
+    patch_artist=True,
+    showfliers=False
+)
+
+for patch, color in zip(box["boxes"], [WT_COLOR, KO_COLOR]):
+    patch.set_facecolor(color)
+    patch.set_alpha(0.5)
+    patch.set_edgecolor("black")
+    patch.set_linewidth(1.2)
+
+for median in box["medians"]:
+    median.set_color("black")
+    median.set_linewidth(1.5)
+
+for whisker in box["whiskers"]:
+    whisker.set_linewidth(1.2)
+
+for cap in box["caps"]:
+    cap.set_linewidth(1.2)
+
+rng = np.random.default_rng(0)
+
+ax.scatter(
+    rng.normal(0, 0.08, len(wt_axons)),
+    wt_axons,
+    s=10,
+    alpha=0.35,
+    color=WT_COLOR,
+    zorder=2
+)
+
+ax.scatter(
+    rng.normal(1, 0.08, len(ko_axons)),
+    ko_axons,
+    s=10,
+    alpha=0.35,
+    color=KO_COLOR,
+    zorder=2
+)
+
+ax.scatter(
+    rng.normal(0, 0.03, len(wt_mouse)),
+    wt_mouse,
+    s=90,
+    color=WT_COLOR,
+    edgecolor="white",
+    linewidth=0.8,
+    zorder=4
+)
+
+ax.scatter(
+    rng.normal(1, 0.03, len(ko_mouse)),
+    ko_mouse,
+    s=90,
+    color=KO_COLOR,
+    edgecolor="white",
+    linewidth=0.8,
+    zorder=4
+)
+
+
+def add_bracket(ax, x1, x2, y, h, text):
+    ax.plot([x1, x1, x2, x2], [y, y + h, y + h, y], lw=1.3, color="black")
+    ax.text((x1 + x2) / 2, y + h + 0.015, text,
+            ha="center", va="bottom", fontsize=13)
+
+
+add_bracket(ax, 0, 1, bracket_y, bracket_h, gee_sig)
+
+ax.set_ylabel(y_label)
+ax.set_title(plot_title, pad=20)
+
+ax.set_xticks([0, 1])
+ax.set_xticklabels(group_labels)
+
+ax.set_ylim(0, y_max)
+ax.set_yticks(np.arange(0, y_max + 0.06, 0.2))
+
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
+ax.tick_params(width=1.2, length=5)
+
+plt.tight_layout()
+
+pdf_path = os.path.join(plot_dir, "nopt_circularity_axonlevel.pdf")
+plt.savefig(pdf_path, format="pdf", bbox_inches="tight")
+
+print("\nPlot saved as:")
+print(f"- {pdf_path}")
+
+plt.show()
+
+
+# ------------------------------------------------------------
+# (11) REPORT RESULTS
+# ------------------------------------------------------------
+print("\n==================== REPORTING VALUES ====================")
+print(f"WT: {n_wt_mice} mice, {n_wt_axons} axons")
+print(f"KO: {n_ko_mice} mice, {n_ko_axons} axons")
+
+print("\nGEE analysis:")
+print(f"Effect KO vs WT: {gee_effect:.6f}")
+print(f"95% CI: [{gee_ci_low:.6f}, {gee_ci_high:.6f}]")
+print(f"p-value: {gee_p:.6g}")
+print(f"Significance label: {gee_sig}")
+
+print("\nMann-Whitney U test:")
+print(f"U statistic: {mw_u}")
+print(f"p-value: {mw_p:.6g}")
+print(f"Significance label: {mw_sig}")
+
+print("\nFiles saved:")
+print(f"- {summary_table_path}")
+print(f"- {statistics_table_path}")
+print(f"- {axon_table_path}")
+print(f"- {mouse_table_path}")
+print(f"- {pdf_path}")
