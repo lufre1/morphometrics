@@ -724,6 +724,7 @@ def _compute_mito_metrics_worker(task):
 def _aggregate_per_cell_lazy(
     per_mito_df, cell_path, cell_key, vol_shape,
     voxel_size_nm, compute_surface, block_shape, cell_scale=(1, 1, 1),
+    compute_cell_surface=True,
 ):
     """Build per-cell summary from per-mito results using lazy cell-label loading."""
     cell_bboxes, cell_vcounts, cell_vol_shape = _scan_bboxes(cell_path, cell_key, block_shape)
@@ -752,7 +753,7 @@ def _aggregate_per_cell_lazy(
 
         cell_surface_um2 = np.nan
         cell_sphericity  = np.nan
-        if compute_surface and spacing_zyx_um is not None:
+        if compute_surface and compute_cell_surface and spacing_zyx_um is not None:
             slices   = _bb_to_slices(cell_bboxes[cid], cell_vol_shape, margin=1)
             cell_bb  = _load_subvolume_from_path(cell_path, cell_key, slices)
             cell_obj = cell_bb == cid
@@ -958,6 +959,14 @@ def main(args):
         mito_ids = sorted(bboxes.keys())
         print(f"  Found {len(mito_ids)} objects.")
 
+        # Z-range filtering: keep only mitos whose bbox overlaps [z_start, z_end].
+        if args.z_start is not None or args.z_end is not None:
+            z0 = args.z_start if args.z_start is not None else 0
+            z1 = args.z_end   if args.z_end   is not None else (vol_shape[0] - 1)
+            mito_ids = [mid for mid in mito_ids
+                        if bboxes[mid][0] <= z1 and bboxes[mid][1] >= z0]
+            print(f"  After z-range filter [{z0}, {z1}]: {len(mito_ids)} objects.")
+
         # Step 2: detect mito→raw scale (mito segmentation may be at coarser resolution).
         raw_arr = _open_lazy(raw_path, args.raw_key)
         raw_vol_shape = raw_arr.shape
@@ -1002,6 +1011,12 @@ def main(args):
 
         per_mito_df = pd.DataFrame(rows)
 
+        # Cell/axon ID whitelist: keep only mitos assigned to the requested IDs.
+        if args.cell_ids and not per_mito_df.empty and "cell_id" in per_mito_df.columns:
+            keep = set(args.cell_ids)
+            per_mito_df = per_mito_df[per_mito_df["cell_id"].isin(keep)].copy()
+            print(f"  After cell ID filter: {len(per_mito_df)} mitos in {len(keep)} cells/axons.")
+
         # Step 5: nearest-neighbour distances (in main process; centroids are tiny).
         if len(rows) >= 2:
             pts = per_mito_df[["centroid_z_um", "centroid_y_um", "centroid_x_um"]].values
@@ -1018,6 +1033,7 @@ def main(args):
                 per_mito_df, cell_path, args.cell_key,
                 vol_shape, voxel_size_nm, compute_surface, block_shape,
                 cell_scale=cell_scale,
+                compute_cell_surface=not args.no_cell_surface,
             )
 
         per_mito_df.insert(0, "mito_file", os.path.basename(mito_path))
@@ -1123,8 +1139,19 @@ if __name__ == "__main__":
                          "pre-computed connected-component labels for large volumes.")
     ap.add_argument("--no_surface", action="store_true",
                     help="Skip marching-cubes surface area (faster).")
+    ap.add_argument("--no_cell_surface", action="store_true",
+                    help="Skip marching-cubes surface area for cells only (avoids OOM on large objects).")
     ap.add_argument("--skeleton", action="store_true",
                     help="Compute skeleton length (slow; branches/endpoints not yet implemented).")
+    ap.add_argument("--z_start", "-zs", type=int, default=None,
+                    help="First z slice to include (0-indexed, inclusive). "
+                         "Mito objects whose bounding box doesn't overlap this range are skipped.")
+    ap.add_argument("--z_end", "-ze", type=int, default=None,
+                    help="Last z slice to include (0-indexed, inclusive). "
+                         "Mito objects whose bounding box doesn't overlap this range are skipped.")
+    ap.add_argument("--cell_ids", "-cids", type=int, nargs="+", default=None,
+                    help="Whitelist of cell/axon label IDs. Only mitos assigned to these "
+                         "IDs (via the cell segmentation) are kept in the output.")
     ap.add_argument("--verbose", "-v", action="store_true")
     ap.add_argument("--no_qc_border", action="store_true",
                     help="Do not exclude mitos touching the volume boundary.")
