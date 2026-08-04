@@ -1,0 +1,16 @@
+__pycache__/
+checkpoints/
+logs/
+config.py
+slurm/
+slurm*
+*.egg-info/
+*.pyc
+.venv/
+env/
+.conda/
+.DS_Store
+*.csv
+data/
+figures/
+table/
