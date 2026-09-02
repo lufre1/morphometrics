@@ -266,7 +266,7 @@ def panel(ax, spec, axon_vals, mito_vals=None, test_vals=None, jitter_seed=0):
 
     # Large white-ringed points: one per axon. Identical marker in every figure so the
     # symbol always means the same thing; the ring keeps them legible over the small-dot
-    # cloud. Panels that test pooled mitochondria hide them -- nothing there is per-axon.
+    # cloud. Drawn in every panel, including the pooled-test ones -- the legend says so.
     if spec.get("show_axon_dots", True):
         for x, vals, color in zip([0, 1], axon_vals, colors):
             ax.scatter(rng.normal(x, 0.05, len(vals)), vals, s=90, color=color,
@@ -462,7 +462,7 @@ def make_figures(data_dir, qc):
         source_table=mito_table, ncols=3, figsize=(13.5, 9),
         legend_entries=[
             ("mito", "one mitochondrion — violin and box show this distribution"),
-            ("axon", "one axon, median of its mitochondria (panels A–D only)"),
+            ("axon", "one axon, median of its mitochondria"),
         ],
     )
     stats = pd.DataFrame(rows)

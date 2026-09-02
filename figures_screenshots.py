@@ -23,6 +23,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
+import matplotlib.patheffects as pe
 import numpy as np
 from PIL import Image
 
@@ -52,15 +53,24 @@ VIEW_LABELS = {
 # IMAGE UTILS
 # ------------------------------------------------------------
 
-def load_and_pad(image_path, target_shape):
+def load_and_pad(image_path, target_shape, erase_bbox=None):
     """Load PNG, scale it to fill target_shape (h, w, c) preserving aspect ratio, pad the rest.
 
     Source screenshots differ in native pixel size (4007 renders are ~6% larger than 4010's),
     so pasting them 1:1 onto a shared canvas -- the old behaviour -- left 4010 looking smaller
     than 4007 in every panel. Scaling each image up to fill the canvas first removes that
     resolution artifact so panel content is a consistent size across genotypes.
+
+    erase_bbox, if given, blanks out the baked-in scale bar (see detect_scale_bar) before
+    resizing -- draw_scale_bar() replaces it with a crisp vector one.
+
+    Returns (padded_image, scale) -- scale is also needed to size the replacement bar.
     """
     img = mpimg.imread(image_path)
+
+    if erase_bbox is not None:
+        r0, r1, c0, c1 = erase_bbox
+        img[r0:r1, c0:c1, :3] = 0.0
 
     target_h, target_w = target_shape[:2]
     h, w = img.shape[:2]
@@ -78,7 +88,7 @@ def load_and_pad(image_path, target_shape):
     y_pad = (target_h - new_h) // 2
     x_pad = (target_w - new_w) // 2
     bg[y_pad:y_pad + new_h, x_pad:x_pad + new_w, :] = img
-    return bg
+    return bg, scale
 
 
 def compute_target_size(image_paths):
@@ -91,30 +101,87 @@ def compute_target_size(image_paths):
     return (max_h, max_w)
 
 
+def detect_scale_bar(image_path):
+    """Locate the baked-in scale bar (tick line + label) in an image's bottom-right corner.
+
+    Returns (bar_px_length, erase_bbox): the tick line's length in pixels, and a bounding box
+    (row0, row1, col0, col1) covering the line and its label, for load_and_pad to blank out.
+
+    ponytail: assumes the bar reads "2 µm" -- true for both current samples (confirmed
+    visually). If a future screenshot uses a different bar length, add a per-sample override.
+    """
+    img = np.array(Image.open(image_path).convert("RGB"))
+    h, w, _ = img.shape
+    row0, col0 = int(h * 0.85), int(w * 0.5)
+    region = img[row0:, col0:]
+    white = np.all(region > 240, axis=-1)
+    if not white.any():
+        raise ValueError(f"no scale bar found in {image_path}")
+
+    rows = np.where(white.any(axis=1))[0]
+    cols = np.where(white.any(axis=0))[0]
+
+    tick_row = rows[len(rows) // 2]
+    tick_cols = np.where(white[tick_row])[0]
+    runs = np.split(tick_cols, np.where(np.diff(tick_cols) != 1)[0] + 1)
+    bar_px_length = len(max(runs, key=len))
+
+    margin = 6
+    r0, r1 = row0 + max(rows.min() - margin, 0), row0 + min(rows.max() + margin, region.shape[0] - 1)
+    c0, c1 = col0 + max(cols.min() - margin, 0), col0 + min(cols.max() + margin, region.shape[1] - 1)
+    return bar_px_length, (r0, r1, c0, c1)
+
+
+def calibrate_scale_bars(data_dir):
+    """One calibration per sample -- the bar is identical across a sample's 3 views."""
+    calib = {}
+    for sample_id in SAMPLES:
+        path = os.path.join(data_dir, f"{sample_id}_3d", f"{sample_id}_axons_3d.png")
+        bar_px_length, erase_bbox = detect_scale_bar(path)
+        calib[sample_id] = dict(bar_px_length=bar_px_length, erase_bbox=erase_bbox)
+    return calib
+
+
+def draw_scale_bar(ax, fraction, label="2 µm"):
+    """Draw a crisp vector scale bar (white, black-outlined) near an axes' bottom-right."""
+    x1, y = 0.95, 0.06
+    x0 = x1 - fraction
+    outline = [pe.withStroke(linewidth=2.5, foreground="black")]
+    ax.plot([x0, x1], [y, y], transform=ax.transAxes, color="white", lw=2.2,
+            solid_capstyle="butt", path_effects=outline, zorder=5)
+    for x in (x0, x1):
+        ax.plot([x, x], [y - 0.012, y + 0.012], transform=ax.transAxes, color="white",
+                lw=2.2, path_effects=outline, zorder=5)
+    ax.text((x0 + x1) / 2, y + 0.02, label, transform=ax.transAxes, color="white",
+            fontsize=9, ha="center", va="bottom", path_effects=outline, zorder=5)
+
+
 # ------------------------------------------------------------
 # PLOTTING
 # ------------------------------------------------------------
 
-def plot_2x3(fig, data_dir, target_size):
+def plot_2x3(fig, data_dir, target_size, calib):
     """Layout: 2 rows (genotypes) × 3 columns (views)."""
     axes = []
-    
+
     # Row 1: WT, Row 2: KO
     genotypes = ["4010", "4007"]
-    
+
     for row_idx, (sample_id, genotype_label) in enumerate(SAMPLES.items()):
         for col_idx, view in enumerate(VIEWS):
             ax = fig.add_subplot(2, 3, row_idx * 3 + col_idx + 1)
             axes.append(ax)
-            
+
             img_dir = os.path.join(data_dir, f"{sample_id}_3d")
             filename = f"{sample_id}_{view}_3d.png"
             image_path = os.path.join(img_dir, filename)
-            
-            img = load_and_pad(image_path, target_size)
+
+            img, scale = load_and_pad(image_path, target_size, calib[sample_id]["erase_bbox"])
             ax.imshow(img)
             ax.axis("off")
-            
+            fraction = calib[sample_id]["bar_px_length"] * scale / target_size[1]
+            draw_scale_bar(ax, fraction)
+
             if row_idx == 0:
                 ax.set_title(VIEW_LABELS[view], fontsize=11, pad=10)
             
@@ -126,26 +193,28 @@ def plot_2x3(fig, data_dir, target_size):
     return axes
 
 
-def plot_3x2(fig, data_dir, target_size):
+def plot_3x2(fig, data_dir, target_size, calib):
     """Layout: 3 rows (views) × 2 columns (genotypes)."""
     axes = []
-    
+
     # Cols: WT (4010), KO (4007)
     sample_ids = ["4010", "4007"]
-    
+
     for row_idx, view in enumerate(VIEWS):
         for col_idx, sample_id in enumerate(sample_ids):
             ax = fig.add_subplot(3, 2, row_idx * 2 + col_idx + 1)
             axes.append(ax)
-            
+
             img_dir = os.path.join(data_dir, f"{sample_id}_3d")
             filename = f"{sample_id}_{view}_3d.png"
             image_path = os.path.join(img_dir, filename)
-            
-            img = load_and_pad(image_path, target_size)
+
+            img, scale = load_and_pad(image_path, target_size, calib[sample_id]["erase_bbox"])
             ax.imshow(img)
             ax.axis("off")
-            
+            fraction = calib[sample_id]["bar_px_length"] * scale / target_size[1]
+            draw_scale_bar(ax, fraction)
+
             if row_idx == 0:
                 ax.set_title(SAMPLES[sample_id], fontsize=12, pad=10)
             
@@ -169,6 +238,7 @@ def build_figure(data_dir, layout="2x3"):
             image_paths.append(os.path.join(img_dir, f"{sample_id}_{view}_3d.png"))
     
     target_size = compute_target_size(image_paths)
+    calib = calibrate_scale_bars(data_dir)
 
     # ponytail: figsize is derived from the screenshot aspect ratio (not hardcoded) so each
     # panel cell matches the image shape -- otherwise imshow letterboxes and leaves an uneven
@@ -180,12 +250,12 @@ def build_figure(data_dir, layout="2x3"):
     if layout == "2x3":
         ncols, nrows = 3, 2
         fig = plt.figure(figsize=(panel_width * ncols, panel_height * nrows))
-        plot_2x3(fig, data_dir, target_size)
+        plot_2x3(fig, data_dir, target_size, calib)
         fig.suptitle("3D reconstructions — 4010 (WT) vs 4007 (Plp⁻/y)", fontsize=14, y=0.98)
     else:
         ncols, nrows = 2, 3
         fig = plt.figure(figsize=(panel_width * ncols, panel_height * nrows))
-        plot_3x2(fig, data_dir, target_size)
+        plot_3x2(fig, data_dir, target_size, calib)
         fig.suptitle("3D reconstructions — 4010 (WT) vs 4007 (Plp⁻/y)", fontsize=14, y=0.99)
     
     fig.tight_layout(rect=[0, 0, 1, 0.96], pad=0.3, h_pad=0.2, w_pad=0.2)
