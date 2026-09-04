@@ -139,10 +139,15 @@ FIG2_PANELS = [
 # DATA LOADING
 # ------------------------------------------------------------
 
-def _load_concat(data_dir, filename):
-    """Concatenate one CSV per sample, tagging each row with sample and genotype."""
+def _load_concat(data_dir, filename, samples=None):
+    """Concatenate one CSV per sample, tagging each row with sample and genotype.
+
+    samples defaults to the module-level SAMPLES (the two *_morphometrics_final dirs);
+    pass a different {directory: genotype} mapping to read another set of runs, e.g.
+    the IMOD ones from figure_pipeline_forest.py.
+    """
     frames = []
-    for sample, genotype in SAMPLES.items():
+    for sample, genotype in (SAMPLES if samples is None else samples).items():
         path = os.path.join(data_dir, sample, filename)
         df = pd.read_csv(path)
         df["sample"] = sample.split("_")[0]
@@ -159,21 +164,21 @@ def _axon_uid(df):
     return df["sample"] + "__axon_" + df["cell_id"].astype(int).astype(str)
 
 
-def load_cell_volumes(data_dir):
+def load_cell_volumes(data_dir, samples=None):
     """Axon volumes -- the only thing still read from cell_level_mito_summary.csv.
 
     Its summary columns (mito_count, *_density, median_mito_*) are all derived from the
     QC'd mito table, so using them would pin figure 1 to QC data regardless of --qc.
     """
-    df = _load_concat(data_dir, "cell_level_mito_summary.csv")
+    df = _load_concat(data_dir, "cell_level_mito_summary.csv", samples)
     df["axon_uid"] = _axon_uid(df)
     return df[["axon_uid", "sample", "genotype", "cell_volume_um3"]]
 
 
-def load_mito_level(data_dir, qc):
+def load_mito_level(data_dir, qc, samples=None):
     """Per-mitochondrion table. qc=True uses the QC-filtered variant."""
     filename = "mito_morphometrics_3d_qc.csv" if qc else "mito_morphometrics_3d.csv"
-    df = _load_concat(data_dir, filename)
+    df = _load_concat(data_dir, filename, samples)
     df["axon_uid"] = _axon_uid(df)
     return df, filename
 

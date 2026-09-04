@@ -155,6 +155,12 @@ def _scan_bboxes(path, key, block_shape=(64, 512, 512)):
                     x1 = min(x0 + bx, X)
                     chunk = np.asarray(arr[z0:z1, y0:y1, x0:x1])
 
+                    # Sparse label volumes are mostly background; `.any()` is a cheap
+                    # reduction, while np.unique below sorts the whole block.
+                    if not chunk.any():
+                        pbar.update(1)
+                        continue
+
                     ids = np.unique(chunk)
                     ids = ids[ids != 0]
                     for mid in ids:
@@ -587,7 +593,7 @@ def _compute_mito_metrics_worker(task):
     else:
         raw_slices = mito_slices
 
-    raw_bb  = _load_subvolume_from_path(raw_path,  raw_key,  raw_slices)
+    raw_bb  = _load_subvolume_from_path(raw_path, raw_key, raw_slices) if raw_path else None
     mito_bb = _load_subvolume_from_path(mito_path, mito_key, mito_slices)
 
     if mito_scale != (1, 1, 1):
@@ -637,12 +643,17 @@ def _compute_mito_metrics_worker(task):
         volume_um3     = np.nan
         spacing_zyx_um = None
 
-    # --- intensity ---
-    pv = raw_bb[local_mask].astype(float)
-    intensity_mean = float(pv.mean())
-    intensity_min  = float(pv.min())
-    intensity_max  = float(pv.max())
-    intensity_std  = float(pv.std())
+    # --- intensity (only when a raw volume was given) ---
+    if raw_bb is not None:
+        pv = raw_bb[local_mask].astype(float)
+        intensity = {
+            "mean_intensity": float(pv.mean()),
+            "min_intensity":  float(pv.min()),
+            "max_intensity":  float(pv.max()),
+            "std_intensity":  float(pv.std()),
+        }
+    else:
+        intensity = {}
 
     # --- shape metrics ---
     (a_um, b_um, c_um), ax_metrics = _principal_axes_um(scaled_coords)
@@ -711,10 +722,7 @@ def _compute_mito_metrics_worker(task):
         "centroid_y_um":       float(centroid_um[1]),
         "centroid_x_um":       float(centroid_um[2]),
         "nearest_neighbor_um": np.nan,
-        "mean_intensity":      intensity_mean,
-        "min_intensity":       intensity_min,
-        "max_intensity":       intensity_max,
-        "std_intensity":       intensity_std,
+        **intensity,
     }
     if compute_skeleton:
         row["skeleton_length_um"] = skel_len
@@ -906,7 +914,7 @@ def main(args):
     n_workers = args.n_workers if args.n_workers > 0 else os.cpu_count()
 
     # --- collect file paths ---
-    paths = _find_paths(args.path, ext)
+    paths = _find_paths(args.path, ext) if args.path is not None else []
     raw_paths = [p for p in paths if args.raw_pattern in p] if args.raw_pattern else paths
 
     mito_label_paths = []
@@ -923,10 +931,15 @@ def main(args):
     mito_label_paths = sorted(mito_label_paths)
     cell_label_paths = sorted(cell_label_paths)
 
-    if not raw_paths:
+    if args.path is not None and not raw_paths:
         raise FileNotFoundError(f"No raw files found under {args.path!r}")
     if not mito_label_paths:
         raise FileNotFoundError(f"No mito label files found under {args.mito_label_path!r}")
+
+    if args.path is None:
+        # Label-only mode: no raw volume. Intensity stats are skipped, geometry is unaffected.
+        print("No --path given: running without raw data (intensity columns omitted).")
+        raw_paths = [None] * len(mito_label_paths)
 
     assert len(raw_paths) == len(mito_label_paths), (
         f"Unequal raw ({len(raw_paths)}) and mito label ({len(mito_label_paths)}) file counts."
@@ -968,9 +981,13 @@ def main(args):
             print(f"  After z-range filter [{z0}, {z1}]: {len(mito_ids)} objects.")
 
         # Step 2: detect mito→raw scale (mito segmentation may be at coarser resolution).
-        raw_arr = _open_lazy(raw_path, args.raw_key)
-        raw_vol_shape = raw_arr.shape
-        del raw_arr
+        # Without raw, the mito volume itself defines the reference coordinate space.
+        if raw_path is None:
+            raw_vol_shape = vol_shape
+        else:
+            raw_arr = _open_lazy(raw_path, args.raw_key)
+            raw_vol_shape = raw_arr.shape
+            del raw_arr
         mito_scale = tuple(max(1, round(raw_vol_shape[i] / vol_shape[i])) for i in range(3))
         if mito_scale != (1, 1, 1):
             print(f"  Mito→raw scale: {mito_scale}  "
@@ -1039,17 +1056,18 @@ def main(args):
         per_mito_df.insert(0, "mito_file", os.path.basename(mito_path))
         if cell_path:
             per_mito_df.insert(0, "cell_file", os.path.basename(cell_path))
-        per_mito_df.insert(0, "raw_file", os.path.basename(raw_path))
+        per_mito_df.insert(0, "raw_file", os.path.basename(raw_path) if raw_path else "")
         all_mito_rows.append(per_mito_df)
 
         if cell_df is not None and not cell_df.empty:
             cell_df.insert(0, "mito_file", os.path.basename(mito_path))
             cell_df.insert(0, "cell_file", os.path.basename(cell_path) if cell_path else None)
-            cell_df.insert(0, "raw_file", os.path.basename(raw_path))
+            cell_df.insert(0, "raw_file", os.path.basename(raw_path) if raw_path else "")
             all_cell_rows.append(cell_df)
 
     # --- write outputs ---
-    out_dir = Path(args.output_path) if args.output_path else Path(args.path) / "morphometrics_3d"
+    out_dir = (Path(args.output_path) if args.output_path
+               else Path(args.path or args.mito_label_path) / "morphometrics_3d")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     mito_out = out_dir / "mito_morphometrics_3d.csv"
@@ -1106,8 +1124,11 @@ if __name__ == "__main__":
         description="3D morphometrics for mitochondria (and cells) from TIFF or Zarr v2 volumes.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    ap.add_argument("--path", "-p", type=str, required=True,
-                    help="Directory or file containing raw TIFF volume(s).")
+    ap.add_argument("--path", "-p", type=str, default=None,
+                    help="Directory or file containing raw TIFF volume(s). Optional: omit for "
+                         "label-only data (no raw available). The four intensity columns are then "
+                         "not written and the mean_intensity QC gate is skipped; every geometric "
+                         "metric is unaffected, as those come from the label volumes alone.")
     ap.add_argument("--mito_label_path", "-mlpth", type=str, default=None,
                     help="Directory or file containing mitochondria segmentation TIFF(s).")
     ap.add_argument("--cell_label_path", "-clpth", type=str, default=None,
