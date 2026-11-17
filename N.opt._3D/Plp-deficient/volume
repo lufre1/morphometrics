@@ -1,0 +1,519 @@
+# ============================================================
+# 3D SINGLE-MITO ANALYSIS — MITOCHONDRIAL VOLUME
+# EXPLORATORY MITOCHONDRION-TO-AXON ANALYSIS
+#
+# PLOT STRUCTURE:
+# - Small points = individual mitochondria
+# - Large points = axon medians
+#
+# STATISTICS:
+# - Exploratory Mann–Whitney U test on axon-level medians
+#
+# IMPORTANT:
+# Only one mouse per genotype was available.
+# Therefore, no genotype-level biological inference is made.
+# ============================================================
+
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from scipy.stats import mannwhitneyu
+
+
+# ------------------------------------------------------------
+# (1) SETTINGS
+# ------------------------------------------------------------
+wt_file = "4010_mito_morphometrics_3d.csv"
+ko_file = "4007_mito_morphometrics_3d.csv"
+
+value_col = "volume_um3"
+axon_col = "cell_id"
+
+group_labels = ["WT", r"$\mathit{Plp}^{-/y}$"]
+
+y_label = r"Mitochondrial volume (µm$^3$)"
+plot_title = "3D mitochondrial volume"
+
+y_max = 0.9
+bracket_y = 0.8
+bracket_h = 0.02
+
+WT_COLOR = "#1b9e77"
+KO_COLOR = "#fc8d62"
+
+table_dir = "table"
+plot_dir = "Plots"
+
+os.makedirs(table_dir, exist_ok=True)
+os.makedirs(plot_dir, exist_ok=True)
+
+
+# ------------------------------------------------------------
+# (2) LOAD DATA
+# ------------------------------------------------------------
+def load_csv_auto(file_name, genotype_label, mouse_id_label):
+    """
+    Load one single-mitochondrion CSV file.
+
+    The separator is detected automatically because CSV files exported
+    from Numbers/Excel may use comma, semicolon, or tab separators.
+    """
+    df = pd.read_csv(
+        file_name,
+        sep=None,
+        engine="python"
+    )
+
+    df.columns = (
+        df.columns
+        .astype(str)
+        .str.strip()
+        .str.replace("\ufeff", "", regex=False)
+    )
+
+    df["genotype"] = genotype_label
+    df["mouse_id"] = mouse_id_label
+
+    return df
+
+
+wt_df = load_csv_auto(
+    wt_file,
+    genotype_label="wt",
+    mouse_id_label="4010"
+)
+
+ko_df = load_csv_auto(
+    ko_file,
+    genotype_label="ko",
+    mouse_id_label="4007"
+)
+
+df = pd.concat(
+    [wt_df, ko_df],
+    ignore_index=True
+)
+
+print("\n==================== RAW DATA ====================")
+print("Detected columns:")
+print(df.columns.tolist())
+
+print("\nFirst rows:")
+print(df.head())
+
+
+# ------------------------------------------------------------
+# (3) REQUIRED COLUMNS
+# ------------------------------------------------------------
+required_cols = [
+    "genotype",
+    "mouse_id",
+    axon_col,
+    value_col
+]
+
+missing = [c for c in required_cols if c not in df.columns]
+
+if missing:
+    raise ValueError(f"Missing columns: {missing}")
+
+
+# ------------------------------------------------------------
+# (4) CLEAN DATA
+# ------------------------------------------------------------
+df["genotype"] = (
+    df["genotype"]
+    .astype(str)
+    .str.strip()
+    .str.lower()
+)
+
+df = df[df["genotype"].isin(["wt", "ko"])].copy()
+
+# Numbers often exports cell IDs such as 39 as 39.0.
+df[axon_col] = (
+    df[axon_col]
+    .astype(float)
+    .astype(int)
+    .astype(str)
+)
+
+df[value_col] = (
+    df[value_col]
+    .astype(str)
+    .str.replace(",", ".", regex=False)
+)
+
+df[value_col] = pd.to_numeric(
+    df[value_col],
+    errors="coerce"
+)
+
+df = df.dropna(
+    subset=[
+        "genotype",
+        "mouse_id",
+        axon_col,
+        value_col
+    ]
+).copy()
+
+print("\n==================== CLEANED MITO-LEVEL DATA ====================")
+print("Remaining mitochondria:", len(df))
+
+print("\nMitochondria per genotype:")
+print(df.groupby("genotype")[value_col].count())
+
+print("\nAxons per genotype:")
+print(df.groupby("genotype")[axon_col].nunique())
+
+print("\nMito-level summary:")
+print(df[value_col].describe())
+
+
+# ------------------------------------------------------------
+# (5) AGGREGATE TO AXON LEVEL
+# ------------------------------------------------------------
+# For each axon, the median mitochondrial volume is calculated.
+#
+# Individual mitochondria are shown as small points in the plot.
+# The exploratory Mann–Whitney U test is performed on axon-level
+# medians to avoid treating each mitochondrion as an independent
+# biological replicate.
+# ------------------------------------------------------------
+axon_df = (
+    df.groupby(
+        ["genotype", "mouse_id", axon_col],
+        as_index=False
+    )
+    .agg(
+        axon_median_volume=(value_col, "median"),
+        axon_mean_volume=(value_col, "mean"),
+        axon_sd_volume=(value_col, "std"),
+        n_mito=(value_col, "size")
+    )
+)
+
+print("\n==================== AXON-LEVEL DATA ====================")
+print(axon_df.head())
+
+print("\nAxon-level summary:")
+print(axon_df["axon_median_volume"].describe())
+
+
+# ------------------------------------------------------------
+# (6) EXTRACT VALUES FOR PLOTTING AND TESTING
+# ------------------------------------------------------------
+wt_mito = (
+    df.loc[df["genotype"] == "wt", value_col]
+    .dropna()
+    .astype(float)
+    .values
+)
+
+ko_mito = (
+    df.loc[df["genotype"] == "ko", value_col]
+    .dropna()
+    .astype(float)
+    .values
+)
+
+wt_axons = (
+    axon_df.loc[
+        axon_df["genotype"] == "wt",
+        "axon_median_volume"
+    ]
+    .dropna()
+    .astype(float)
+    .values
+)
+
+ko_axons = (
+    axon_df.loc[
+        axon_df["genotype"] == "ko",
+        "axon_median_volume"
+    ]
+    .dropna()
+    .astype(float)
+    .values
+)
+
+
+# ------------------------------------------------------------
+# (7) DESCRIPTIVE STATISTICS
+# ------------------------------------------------------------
+wt_mean = np.mean(wt_axons)
+wt_sd = np.std(wt_axons, ddof=1)
+wt_median = np.median(wt_axons)
+
+ko_mean = np.mean(ko_axons)
+ko_sd = np.std(ko_axons, ddof=1)
+ko_median = np.median(ko_axons)
+
+print("\n==================== DESCRIPTIVE STATISTICS ====================")
+print("Descriptive values are based on axon-level medians.")
+print(f"WT mean ± SD: {wt_mean:.5f} ± {wt_sd:.5f} µm³")
+print(f"WT median: {wt_median:.5f} µm³")
+print(f"KO mean ± SD: {ko_mean:.5f} ± {ko_sd:.5f} µm³")
+print(f"KO median: {ko_median:.5f} µm³")
+
+
+# ------------------------------------------------------------
+# (8) EXPLORATORY MANN–WHITNEY U TEST
+# ------------------------------------------------------------
+print("\n==================== EXPLORATORY MANN-WHITNEY U TEST ====================")
+print("The Mann–Whitney U test is performed on axon-level medians only.")
+
+mw_result = mannwhitneyu(
+    wt_axons,
+    ko_axons,
+    alternative="two-sided"
+)
+
+mw_u = mw_result.statistic
+mw_p = mw_result.pvalue
+
+print(f"Exploratory Mann–Whitney U statistic: {mw_u}")
+print(f"Exploratory p-value: {mw_p:.6g}")
+
+
+# ------------------------------------------------------------
+# (9) SAVE TABLES
+# ------------------------------------------------------------
+summary_table = pd.DataFrame({
+    "Genotype": ["WT", "KO"],
+    "n_axons": [len(wt_axons), len(ko_axons)],
+    "n_mitochondria": [len(wt_mito), len(ko_mito)],
+    "Mean_of_axon_medians_um3": [wt_mean, ko_mean],
+    "SD_of_axon_medians_um3": [wt_sd, ko_sd],
+    "Median_of_axon_medians_um3": [wt_median, ko_median]
+})
+
+statistics_table = pd.DataFrame({
+    "Outcome": [value_col],
+    "Unit": ["µm³"],
+    "Test_level": ["axon medians"],
+    "Exploratory_Mann_Whitney_U": [mw_u],
+    "Exploratory_p_value": [mw_p]
+})
+
+summary_table_path = os.path.join(
+    table_dir,
+    "3d_single_mito_volume_summary_table.csv"
+)
+
+statistics_table_path = os.path.join(
+    table_dir,
+    "3d_single_mito_volume_statistics_table.csv"
+)
+
+axon_table_path = os.path.join(
+    table_dir,
+    "3d_single_mito_volume_axonlevel_table.csv"
+)
+
+mito_table_path = os.path.join(
+    table_dir,
+    "3d_single_mito_volume_mitolevel_table.csv"
+)
+
+summary_table.to_csv(summary_table_path, index=False)
+statistics_table.to_csv(statistics_table_path, index=False)
+axon_df.to_csv(axon_table_path, index=False)
+df.to_csv(mito_table_path, index=False)
+
+
+# ------------------------------------------------------------
+# (10) CREATE PLOT
+# ------------------------------------------------------------
+fig, ax = plt.subplots(figsize=(5.0, 5.6))
+
+data = [wt_mito, ko_mito]
+
+parts = ax.violinplot(
+    data,
+    positions=[0, 1],
+    showmeans=False,
+    showmedians=False,
+    showextrema=False,
+    widths=0.6,
+    bw_method=0.3,
+    points=200
+)
+
+for i, pc in enumerate(parts["bodies"]):
+
+    color = WT_COLOR if i == 0 else KO_COLOR
+
+    pc.set_facecolor(color)
+    pc.set_alpha(0.35)
+    pc.set_edgecolor("black")
+    pc.set_linewidth(1.0)
+
+box = ax.boxplot(
+    data,
+    positions=[0, 1],
+    widths=0.18,
+    patch_artist=True,
+    showfliers=False
+)
+
+for patch, color in zip(
+    box["boxes"],
+    [WT_COLOR, KO_COLOR]
+):
+
+    patch.set_facecolor(color)
+    patch.set_alpha(0.5)
+    patch.set_edgecolor("black")
+    patch.set_linewidth(1.2)
+
+for median in box["medians"]:
+    median.set_color("black")
+    median.set_linewidth(1.5)
+
+for whisker in box["whiskers"]:
+    whisker.set_linewidth(1.2)
+
+for cap in box["caps"]:
+    cap.set_linewidth(1.2)
+
+
+print("\n==================== PLOT INFORMATION ====================")
+print("Small points = individual mitochondria")
+print("Large points = axon medians")
+print("Exploratory Mann–Whitney U test = performed on axon medians")
+
+rng = np.random.default_rng(0)
+
+# Small points = individual mitochondria
+ax.scatter(
+    rng.normal(0, 0.08, len(wt_mito)),
+    wt_mito,
+    s=10,
+    alpha=0.35,
+    color=WT_COLOR,
+    zorder=2
+)
+
+ax.scatter(
+    rng.normal(1, 0.08, len(ko_mito)),
+    ko_mito,
+    s=10,
+    alpha=0.35,
+    color=KO_COLOR,
+    zorder=2
+)
+
+# Large points = axon medians
+ax.scatter(
+    rng.normal(0, 0.03, len(wt_axons)),
+    wt_axons,
+    s=90,
+    color=WT_COLOR,
+    edgecolor="white",
+    linewidth=0.8,
+    zorder=4
+)
+
+ax.scatter(
+    rng.normal(1, 0.03, len(ko_axons)),
+    ko_axons,
+    s=90,
+    color=KO_COLOR,
+    edgecolor="white",
+    linewidth=0.8,
+    zorder=4
+)
+
+
+def add_bracket(ax, x1, x2, y, h, text):
+    ax.plot(
+        [x1, x1, x2, x2],
+        [y, y + h, y + h, y],
+        lw=1.3,
+        color="black"
+    )
+
+    ax.text(
+        (x1 + x2) / 2,
+        y + h + 0.01,
+        text,
+        ha="center",
+        va="bottom",
+        fontsize=11
+    )
+
+
+p_text = f"exploratory p = {mw_p:.3f}"
+
+add_bracket(
+    ax,
+    0,
+    1,
+    bracket_y,
+    bracket_h,
+    p_text
+)
+
+ax.set_ylabel(y_label)
+ax.set_title(plot_title, pad=20)
+
+ax.set_xticks([0, 1])
+ax.set_xticklabels(group_labels)
+
+ax.set_ylim(0, y_max)
+ax.set_yticks(np.arange(0, y_max + 0.001, 0.1))
+
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
+
+ax.tick_params(
+    width=1.2,
+    length=5
+)
+
+plt.tight_layout()
+
+pdf_path = os.path.join(
+    plot_dir,
+    "3d_single_mito_volume.pdf"
+)
+
+plt.savefig(
+    pdf_path,
+    format="pdf",
+    bbox_inches="tight"
+)
+
+print("\nPlot saved as:")
+print(pdf_path)
+
+plt.show()
+
+
+# ------------------------------------------------------------
+# (11) FINAL REPORT
+# ------------------------------------------------------------
+print("\n==================== FINAL REPORT ====================")
+print("IMPORTANT:")
+print("This analysis is exploratory only.")
+print("Only one mouse per genotype was available.")
+print("Therefore, no genotype-level biological inference is made.")
+
+print(f"\nWT mitochondria: {len(wt_mito)}")
+print(f"KO mitochondria: {len(ko_mito)}")
+
+print(f"WT axons: {len(wt_axons)}")
+print(f"KO axons: {len(ko_axons)}")
+
+print(f"\nExploratory Mann–Whitney p-value: {mw_p:.6g}")
+
+print("\nFiles saved:")
+print(summary_table_path)
+print(statistics_table_path)
+print(axon_table_path)
+print(mito_table_path)
+print(pdf_path)
