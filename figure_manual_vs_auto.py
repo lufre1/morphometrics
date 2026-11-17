@@ -18,6 +18,26 @@ directly whether the genotype effect replicates across segmentation methods.
 Only 4007 (KO) and 4010 (WT) were processed by both pipelines. --manual-animals decides
 what the manual violins hold:
 
+Panel E of the axon-level figure is the raw mitochondria count per axon, the one number
+that says directly whether the automatic pipeline finds as many objects as the hand
+tracing. Being an absolute count it is the one panel that cannot survive unequal z
+coverage: it is honest only at the default --imod-variant z25, which matches the
+automatic 25 um z-window. With --imod-variant full the manual side covers 26-39 um and
+its count is inflated by z coverage, not by the pipeline. Panel D is the volume-corrected
+read of the same quantity and is fine under either variant.
+
+The other panels are variant-independent for two different reasons. A and B are medians
+of per-object shape, which do not scale with how much tissue you sample (measured 1.00x
+and 0.99x between the two variants). C and D are ratios whose numerator and denominator
+are measured over the same z-window in BOTH arms -- true only since the 2026-09 fix to
+morphometrics_3d.py, which made -zs/-ze crop the axon volume as well as the mito list.
+The manual side got that fix by re-running run_morphometrics_imod.sh; the automatic side
+needed run_morphometrics_auto.sh, because the published *_morphometrics_final tables were
+built by the pre-fix script and divide a windowed mito count by a full-extent axon volume
+(low by 1.13-1.58x) while keeping every mito that merely OVERLAPS the window (in 4010,
+28 of 242 objects carrying 21.5% of the mito volume). Those tables are superseded by
+*_morphometrics_auto_z25 and must not be mixed with z25 manual data.
+
   matched (default)  those same two animals, so manual and automatic describe the same
                      tissue and a difference between them is the pipeline
   all                the whole IMOD dataset, 3 animals per genotype. The automatic side
@@ -77,9 +97,9 @@ MANUAL_SETS = {
 }
 
 # x positions: genotypes separated by a gap, pipelines paired inside each genotype
-POS = {("WT", "manual"): 0.0, ("WT", "auto"): 0.8,
-       ("KO", "manual"): 2.0, ("KO", "auto"): 2.8}
-GROUP_CENTRE = {"WT": 0.4, "KO": 2.4}
+POS = {("WT", "manual"): 0.0, ("WT", "auto"): 1.05,
+       ("KO", "manual"): 2.15, ("KO", "auto"): 3.2}
+GROUP_CENTRE = {"WT": 0.525, "KO": 2.675}
 
 BASE_COLOR = {"WT": WT_COLOR, "KO": KO_COLOR}
 
@@ -136,12 +156,16 @@ AXON_PANELS = [
     dict(panel="D", letter="D", title="3D axonal mitochondrial count density",
          ylabel="Mitochondrial density (mitochondria / 100 µm³)",
          column="mito_count_density_per100"),
+    # Raw count, uncorrected for axon volume -- only honest at --imod-variant z25, see
+    # the module docstring. Panel D is the volume-corrected read of the same thing.
+    dict(panel="E", letter="E", title="3D mitochondria per axon (z25 only)",
+         ylabel="Mitochondria per axon (count)", column="mito_count"),
 ]
 
 def sample_dirs(pipeline, variant, manual_animals):
     """-> {result directory: genotype} for one pipeline."""
     if pipeline == "auto":
-        return {f"{a}_morphometrics_final": g
+        return {f"{a}_morphometrics_auto_z25": g
                 for g, animals in AUTO_ANIMALS.items() for a in animals}
     return {f"{a}_morphometrics_imod_{variant}": g
             for g, animals in MANUAL_SETS[manual_animals].items() for a in animals}
@@ -182,8 +206,8 @@ def _values(df, column, genotype, pipeline):
 
 # Two stacked brackets sit at these fractions of the axis height; the axis top is set
 # from the data so the brackets clear it without leaving a band of empty plot.
-BRACKET_FRAC = (0.76, 0.89)
-HEADROOM = 1.42
+BRACKET_FRAC = (0.66, 0.84)
+HEADROOM = 1.6
 
 
 def _fmt_p(p):
@@ -208,8 +232,17 @@ def group_label(genotype, manual_animals):
     return GENOTYPE_LABELS[genotype]
 
 
-def panel4(ax, spec, axon_vals, mito_vals, test_vals, manual_animals, jitter_seed=0):
-    """Draw one four-violin panel. Returns {(comparison): (u, p)}."""
+def panel4(ax, spec, axon_vals, mito_vals, test_vals, animal_vals, manual_animals,
+           jitter_seed=0):
+    """Draw one four-violin panel.
+
+    Returns ({(comparison): (u, p)}, {pipeline: (p_per_animal, n_wt, n_ko)}).
+
+    Each bracket shows the test the panel draws, over axons or over pooled objects; the
+    unit is left to the caption. The same contrast with each animal reduced to one value
+    -- the only independent unit -- is computed and returned for the stats table but not
+    drawn.
+    """
     keys = [(g, p) for g in GENOTYPES for p in PIPELINES]
     dist = [mito_vals[k] if mito_vals is not None else axon_vals[k] for k in keys]
     positions = [POS[k] for k in keys]
@@ -248,33 +281,64 @@ def panel4(ax, spec, axon_vals, mito_vals, test_vals, manual_animals, jitter_see
                    edgecolor="white", linewidth=0.8, zorder=4)
 
     top = _nice_top(max(np.max(v) for v in dist))
-    stats = {}
+    stats, animal_stats = {}, {}
     # one genotype bracket per pipeline: does the WT/KO effect replicate?
     for pipeline, frac in zip(PIPELINES, BRACKET_FRAC):
         u, p = mwu(test_vals[("WT", pipeline)], test_vals[("KO", pipeline)])
         stats[("genotype", pipeline)] = (u, p)
+        n_wt = len(animal_vals[("WT", pipeline)])
+        n_ko = len(animal_vals[("KO", pipeline)])
+        # one animal per genotype: genotype and individual are perfectly confounded,
+        # so there is no per-animal test to report.
+        p_animal = (mwu(animal_vals[("WT", pipeline)], animal_vals[("KO", pipeline)])[1]
+                    if min(n_wt, n_ko) >= 2 else np.nan)
+        animal_stats[pipeline] = (p_animal, n_wt, n_ko)
         add_bracket(ax, POS[("WT", pipeline)], POS[("KO", pipeline)], frac * top, 0.018 * top,
-                    f"{PIPELINE_LABELS[pipeline]}: exploratory {_fmt_p(p)}{spec.get('p_suffix', '')}")
+                    _fmt_p(p), fontsize=15)
     # pipeline comparisons are recorded but not drawn, to keep the panel readable
     for g in GENOTYPES:
         stats[("pipeline", g)] = mwu(test_vals[(g, "manual")], test_vals[(g, "auto")])
 
-    ax.set_title(spec["title"], fontsize=10, pad=12)
-    ax.set_ylabel(spec["ylabel"], fontsize=8)
+    ax.set_title(spec["title"], fontsize=16, pad=12)
+    ax.set_ylabel(spec["ylabel"], fontsize=15)
     ax.set_xticks([POS[k] for k in keys])
-    ax.set_xticklabels([PIPELINE_LABELS[p] for _g, p in keys], fontsize=8)
-    ax.set_xlim(-0.6, 3.4)
+    ax.set_xticklabels([PIPELINE_LABELS[p] for _g, p in keys], fontsize=14)
+    ax.set_xlim(-0.45, 3.65)
     ax.set_ylim(0, top)
     ax.yaxis.set_major_locator(MaxNLocator(6))
     for g in GENOTYPES:                     # genotype label under each pair
-        ax.text(GROUP_CENTRE[g], -0.13, group_label(g, manual_animals),
-                transform=ax.get_xaxis_transform(), ha="center", va="top", fontsize=9)
+        ax.text(GROUP_CENTRE[g], -0.16, group_label(g, manual_animals),
+                transform=ax.get_xaxis_transform(), ha="center", va="top", fontsize=16)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    ax.tick_params(width=1.2, length=5)
+    ax.tick_params(width=1.2, length=5, labelsize=14)
     ax.text(-0.18, 1.06, spec["letter"], transform=ax.transAxes,
-            fontsize=13, fontweight="bold", va="bottom", ha="left")
-    return stats
+            fontsize=22, fontweight="bold", va="bottom", ha="left")
+    return stats, animal_stats
+
+
+def legend_handles(manual_animals, with_mito=True):
+    """Figure-level legend: dot tiers plus the pale/full pipeline swatches."""
+    if manual_animals == "matched":
+        axon_label = "one axon (manual n = 5, automatic n = 10 per animal)"
+    else:
+        # the two sides are not matched samples here, so say exactly what feeds each
+        wt, ko = (", ".join(MANUAL_SETS["all"][g]) for g in ("WT", "KO"))
+        axon_label = ("one axon — manual: 3 animals x 5 axons "
+                      f"(WT {wt}; $\\mathit{{Plp}}^{{-/y}}$ {ko});\n"
+                      "automatic: 1 animal x 10 axons (WT 4010; "
+                      "$\\mathit{Plp}^{-/y}$ 4007)")
+    handles = [
+        Line2D([], [], marker="o", linestyle="none", markersize=3.2,
+               markerfacecolor="0.35", markeredgecolor="none", alpha=0.55,
+               label="one mitochondrion"),
+        Line2D([], [], marker="o", linestyle="none", markersize=9.5,
+               markerfacecolor="0.35", markeredgecolor="white", markeredgewidth=0.8,
+               label=axon_label),
+        Patch(facecolor=_pale("0.45"), edgecolor="black", alpha=0.6, label="manual"),
+        Patch(facecolor="0.45", edgecolor="black", alpha=0.6, label="automatic"),
+    ]
+    return handles if with_mito else handles[1:]
 
 
 def build_figure(panels, rows_out, figure_name, axon_df, mito_df, tables,
@@ -289,14 +353,21 @@ def build_figure(panels, rows_out, figure_name, axon_df, mito_df, tables,
             axon_vals = {k: _values(axon_df, col, *k) for k in POS}
             mito_vals = None
         else:
-            per_axon = mito_df.groupby(["genotype", "pipeline", "axon_uid"],
+            per_axon = mito_df.groupby(["genotype", "pipeline", "sample", "axon_uid"],
                                        as_index=False)[col].median()
             axon_vals = {k: _values(per_axon, col, *k) for k in POS}
             mito_vals = {k: _values(mito_df, col, *k) for k in POS}
 
         test_level = spec.get("test_level", "axon")
         test_vals = mito_vals if test_level == "pooled" else axon_vals
-        stats = panel4(ax, spec, axon_vals, mito_vals, test_vals, manual_animals)
+        # One value per animal: the median of whatever unit this panel tests. The animal is
+        # the only independent unit here; its p-value goes to the stats CSV, not the plot.
+        src = mito_df if (mito_df is not None and test_level == "pooled") else (
+            per_axon if mito_df is not None else axon_df)
+        per_animal = src.groupby(["genotype", "pipeline", "sample"], as_index=False)[col].median()
+        animal_vals = {k: _values(per_animal, col, *k) for k in POS}
+        stats, animal_stats = panel4(ax, spec, axon_vals, mito_vals, test_vals,
+                                     animal_vals, manual_animals)
 
         for (kind, key), (u, p) in stats.items():
             if kind == "genotype":
@@ -314,30 +385,17 @@ def build_figure(panels, rows_out, figure_name, axon_df, mito_df, tables,
                 n_a_objects=len(mito_vals[a]) if mito_vals else "",
                 n_b_objects=len(mito_vals[b]) if mito_vals else "",
                 median_a=float(np.median(test_vals[a])), median_b=float(np.median(test_vals[b])),
-                mwu_u=u, p_value=p, drawn=(kind == "genotype"),
+                mwu_u=u, p_value=p,
+                # the same contrast with each animal reduced to one value; blank for the
+                # manual-vs-automatic rows, which are not a genotype contrast
+                p_value_per_animal=(animal_stats[key][0] if kind == "genotype" else ""),
+                drawn=(kind == "genotype"),
             ))
 
-    if manual_animals == "matched":
-        axon_label = "one axon (manual n = 5, automatic n = 10 per animal)"
-    else:
-        # the two sides are not matched samples here, so say exactly what feeds each
-        wt, ko = (", ".join(MANUAL_SETS["all"][g]) for g in ("WT", "KO"))
-        axon_label = ("one axon — manual: 3 animals x 5 axons "
-                      f"(WT {wt}; $\\mathit{{Plp}}^{{-/y}}$ {ko}); "
-                      "automatic: 1 animal x 10 axons (WT 4010; "
-                      "$\\mathit{Plp}^{-/y}$ 4007)")
-    handles = [
-        Line2D([], [], marker="o", linestyle="none", markersize=3.2,
-               markerfacecolor="0.35", markeredgecolor="none", alpha=0.55,
-               label="one mitochondrion"),
-        Line2D([], [], marker="o", linestyle="none", markersize=9.5,
-               markerfacecolor="0.35", markeredgecolor="white", markeredgewidth=0.8,
-               label=axon_label),
-        Patch(facecolor=_pale("0.45"), edgecolor="black", alpha=0.6, label="manual (IMOD)"),
-        Patch(facecolor="0.45", edgecolor="black", alpha=0.6, label="automatic"),
-    ]
-    if mito_df is None:
-        handles = handles[1:]
+    for ax in axes.ravel()[len(panels):]:   # 5 panels in a 2x3 grid leaves one empty box
+        ax.set_visible(False)
+
+    handles = legend_handles(manual_animals, mito_df is not None)
     fig.legend(handles=handles, loc="lower center", ncol=len(handles), frameon=False,
                fontsize=9, bbox_to_anchor=(0.5, 0.0))
     fig.tight_layout(rect=(0, 0.05, 1, 1))
@@ -375,13 +433,18 @@ def main():
         print(f"  {g:2s} {p:6s}: {n:4d} mitochondria")
 
     rows = []
+    # Every non-default mode lands in the filename: raw and QC runs of the same figure
+    # used to overwrite each other silently, with only a column inside the stats CSV to
+    # tell them apart.
     suffix = "" if args.manual_animals == "matched" else "_all_animals"
+    if args.qc:
+        suffix += "_qc"
     figs = [
         (build_figure(MITO_PANELS, rows, "manual_vs_auto_mito_level", axon_df, mito_df,
                       tables, 2, 3, (13.5, 9), args.manual_animals),
          f"figure_manual_vs_auto_mito_level{suffix}"),
         (build_figure(AXON_PANELS, rows, "manual_vs_auto_axon_level", axon_df, None,
-                      tables, 2, 2, (9, 9), args.manual_animals),
+                      tables, 2, 3, (13.5, 9), args.manual_animals),
          f"figure_manual_vs_auto_axon_level{suffix}"),
     ]
 

@@ -153,7 +153,7 @@ def draw_scale_bar(ax, fraction, label="2 µm"):
         ax.plot([x, x], [y - 0.012, y + 0.012], transform=ax.transAxes, color="white",
                 lw=2.2, path_effects=outline, zorder=5)
     ax.text((x0 + x1) / 2, y + 0.02, label, transform=ax.transAxes, color="white",
-            fontsize=9, ha="center", va="bottom", path_effects=outline, zorder=5)
+            fontsize=16, ha="center", va="bottom", path_effects=outline, zorder=5)
 
 
 # ------------------------------------------------------------

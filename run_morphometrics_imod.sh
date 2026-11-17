@@ -6,9 +6,12 @@
 # All geometric metrics come from the label volumes alone and are unaffected.
 #
 # Two z-ranges per animal: the full traced extent, and a 25 um window centred in z.
-# Note -zs/-ze is an overlap filter on mito bounding boxes, not a crop: a mito
-# straddling the window edge is kept whole. Same semantics as the earlier
-# 4007/4010 automatic runs, so the numbers stay comparable.
+# -zs/-ze restricts the WHOLE analysis to the window: mitos crossing either face are
+# dropped (not truncated, so shape metrics stay valid), and the axon volume counts only
+# in-window voxels. Numerator and denominator therefore describe the same tissue -- before
+# 2026-09 the flags filtered mitos only, leaving every z25 density biased low.
+#
+# Set VARIANTS to rerun a subset, e.g. VARIANTS=z25 ./run_morphometrics_imod.sh
 #
 # Run inside `mamba activate synapse` (the repo's own env.yaml lacks zarr/scipy/synapse).
 set -euo pipefail
@@ -32,7 +35,7 @@ for s in "${SAMPLES[@]}"; do
   read -r ID GRP VZ VY VX ZS ZE <<< "$s"
   Z="$R/$GRP/$ID/${ID}_imod.zarr"
 
-  for VARIANT in full z25; do
+  for VARIANT in ${VARIANTS:-full z25}; do
     OUT="$R/$GRP/$ID/${ID}_morphometrics_imod_${VARIANT}"
     if [ "$VARIANT" = "z25" ]; then ZARGS=(-zs "$ZS" -ze "$ZE"); else ZARGS=(); fi
 

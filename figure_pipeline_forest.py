@@ -3,7 +3,7 @@
 
 Two independent pipelines exist for this project:
 
-  automatic  data/{4007,4010}_morphometrics_final/       10 axons/animal, 1 animal/genotype
+  automatic  data/{4007,4010}_morphometrics_auto_z25/   10 axons/animal, 1 animal/genotype
   hand/IMOD  data/{6 animals}_morphometrics_imod_{full,z25}/  5 axons/animal, 3 animals/genotype
 
 Only 4007 (KO) and 4010 (WT) were processed by both, so this script does NOT try to match
@@ -22,7 +22,7 @@ Usage
 -----
     python figure_pipeline_forest.py                        # raw mito tables, imod "full"
     python figure_pipeline_forest.py --qc --png
-    python figure_pipeline_forest.py --imod-variant z25     # see confound 1 below
+    python figure_pipeline_forest.py --imod-variant z25     # matches the automatic window
     python figure_pipeline_forest.py --selfcheck
 """
 
@@ -78,8 +78,9 @@ MEDIAN_COLS = {
 }
 
 # (block, metric key, row label, caveat recorded in the stats CSV)
-Z_CAVEAT = ("density normalised by the FULL axon volume while mitos are z-filtered "
-            "-- see confound 1 in the module docstring")
+Z_CAVEAT = ("numerator and denominator share one z-window in every arm, so the ratio is "
+            "like-for-like; excluding objects that cross a window face still undercounts "
+            "slightly, by roughly the mean mitochondrial z-extent over the window depth")
 NN_CAVEAT = ("nearest neighbour is computed within each run's own mito set (5 axons for "
              "IMOD, 10 for automatic), so only the within-arm ratio is comparable")
 
@@ -113,7 +114,8 @@ EXPECTED = {
         ("imod(6)", "mito_volume_fraction"): (1.828, 0.318, 1.139),
         ("imod(6)", "membrane_area_density"): (1.586, 0.172, 1.078),
         ("imod(6)", "median_mito_volume_um3"): (0.915, -0.770, 0.324),
-        ("auto(2)", "mito_count_density"): (0.761, -1.417, 0.347),
+        # refreshed 2026-09-16 with the auto_z25 re-run; was (0.761, -1.417, 0.347)
+        ("auto(2)", "mito_count_density"): (0.762, -1.480, 0.305),
         ("imod(2)", "mito_count_density"): (3.132, -0.329, 2.663),
     },
 }
@@ -138,10 +140,11 @@ LEGEND_TEXT = (
     "isolates the effect of the method on the same tissue; imod(2) vs imod(6) isolates the "
     "effect of adding four more animals.\n\n"
     "Source: `{table}`, IMOD variant `{variant}`. "
-    "Caveats: (i) the z-range filter in `morphometrics_3d.py` drops mitochondria outside "
-    "the window but leaves the axon volume denominator at the full traced extent, so all "
-    "three density rows are biased low by an animal-specific factor; the within-arm ratio "
-    "cancels this only if both genotypes lose a similar fraction. (ii) Nearest-neighbour "
+    "Caveats: (i) the z-range restriction in `morphometrics_3d.py` drops mitochondria "
+    "crossing either face of the window and crops the axon volume denominator to the same "
+    "window, so the densities are a like-for-like ratio; excluding boundary objects still "
+    "undercounts slightly, by roughly the mean mitochondrial z-extent over the window "
+    "depth. (ii) Nearest-neighbour "
     "distance is computed within each run's own set of mitochondria, so its absolute value "
     "is not comparable across arms. (iii) Axons were hand-picked in both pipelines, which "
     "is adequate for method comparison but not for biological inference. (iv) Animal 4015 "
@@ -158,7 +161,7 @@ def arm_samples(variant):
     """{arm: {directory_name: genotype}} for the three arms."""
     imod = {sid: f"{sid}_morphometrics_imod_{variant}" for sid in GENOTYPE}
     return {
-        "auto(2)": {f"{sid}_morphometrics_final": GENOTYPE[sid] for sid in MATCHED},
+        "auto(2)": {f"{sid}_morphometrics_auto_z25": GENOTYPE[sid] for sid in MATCHED},
         "imod(2)": {imod[sid]: GENOTYPE[sid] for sid in MATCHED},
         "imod(6)": {imod[sid]: g for sid, g in GENOTYPE.items()},
     }
@@ -406,7 +409,8 @@ def main():
     ap.add_argument("--out-dir", default=".", help="Plots/ and table/ are created here")
     ap.add_argument("--qc", action="store_true", help="use the QC-filtered mito tables")
     ap.add_argument("--imod-variant", default="full", choices=["full", "z25"],
-                    help="which IMOD z-range run to use; 'full' avoids the density bias")
+                    help="which IMOD z-range run to use; 'full' is the whole traced "
+                         "extent, 'z25' a 25 um window matching the automatic runs")
     ap.add_argument("--png", action="store_true", help="also write a PNG")
     ap.add_argument("--selfcheck", action="store_true", help="assert known values and exit")
     args = ap.parse_args()
@@ -415,11 +419,6 @@ def main():
         selfcheck(args.data_dir)
         return
 
-    if args.imod_variant == "z25":
-        print("WARNING: the z25 runs filter mitochondria by z but leave cell_volume_um3 at "
-              "the full axon extent, so all three density rows are biased low. 'full' is "
-              "the defensible default.")
-
     fig, stats, source_table = make_figure(args.data_dir, args.qc, args.imod_variant)
 
     plot_dir = os.path.join(args.out_dir, "Plots")
@@ -427,7 +426,12 @@ def main():
     os.makedirs(plot_dir, exist_ok=True)
     os.makedirs(table_dir, exist_ok=True)
 
-    pdf_path = os.path.join(plot_dir, "figure5_pipeline_forest.pdf")
+    # Both --qc and --imod-variant change the numbers, so both land in the filename.
+    # 'full' is the default variant and stays unsuffixed to keep existing paths stable.
+    suffix = ("" if args.imod_variant == "full" else f"_{args.imod_variant}") + \
+             ("_qc" if args.qc else "")
+
+    pdf_path = os.path.join(plot_dir, f"figure5_pipeline_forest{suffix}.pdf")
     fig.savefig(pdf_path, format="pdf", bbox_inches="tight")
     plt.close(fig)
     print(f"Wrote: {pdf_path}")
@@ -441,11 +445,11 @@ def main():
         plt.close(fig)
         print(f"Wrote: {png_path}")
 
-    csv_path = os.path.join(table_dir, "pipeline_comparison_effects.csv")
+    csv_path = os.path.join(table_dir, f"pipeline_comparison_effects{suffix}.csv")
     stats.drop(columns=["label"]).to_csv(csv_path, index=False)
     print(f"Wrote: {csv_path}  ({len(stats)} rows)")
 
-    legend_path = os.path.join(table_dir, "figure5_legend.md")
+    legend_path = os.path.join(table_dir, f"figure5_legend{suffix}.md")
     with open(legend_path, "w") as fh:
         fh.write(LEGEND_TEXT.format(table=source_table, variant=args.imod_variant,
                                     n_resamples=N_RESAMPLES, seed=BOOT_SEED) + "\n")

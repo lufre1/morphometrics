@@ -114,10 +114,20 @@ def _open_lazy(path, key):
         return imread(path)
 
 
-def _scan_bboxes(path, key, block_shape=(64, 512, 512)):
+def _scan_bboxes(path, key, block_shape=(64, 512, 512), z_range=None):
     """Scan a label volume in 3-D blocks to build per-ID tight bounding boxes.
 
     Keeps only one block in memory at a time — memory use is O(block_size).
+
+    z_range : optional (z_lo, z_hi) inclusive slice range. Only voxels inside the window
+              are scanned, so `vcounts` is the in-window voxel count and `bboxes` are
+              clipped to the window. IDs with no in-window voxel are absent entirely.
+              Pass None (the default) to scan the whole volume.
+
+              Use a window only for a volume you want *measured* over that window (the
+              cell/axon labels, which form the density denominator). Do NOT window a scan
+              whose bboxes you then test for containment in the same window -- the clipped
+              bbox of an object straddling the face would compare as contained.
 
     Returns
     -------
@@ -129,6 +139,8 @@ def _scan_bboxes(path, key, block_shape=(64, 512, 512)):
     vol_shape = arr.shape
     Z, Y, X = vol_shape
     bz, by, bx = block_shape
+    zlo, zhi = ((0, Z - 1) if z_range is None
+                else (max(0, z_range[0]), min(Z - 1, z_range[1])))
 
     # Quick check: if binary label with relabelling needed, fail early.
     sample = np.asarray(arr[0:min(bz, Z), 0:min(by, Y), 0:min(bx, X)])
@@ -148,12 +160,17 @@ def _scan_bboxes(path, key, block_shape=(64, 512, 512)):
     )
     with tqdm(total=total_blocks, desc="  Scanning label volume", leave=False) as pbar:
         for z0 in range(0, Z, bz):
+            # clip the block to the window; skip blocks that fall entirely outside it
+            zb0 = max(z0, zlo)
+            zb1 = min(z0 + bz, zhi + 1)
+            if zb1 <= zb0:
+                pbar.update(((Y + by - 1) // by) * ((X + bx - 1) // bx))
+                continue
             for y0 in range(0, Y, by):
                 for x0 in range(0, X, bx):
-                    z1 = min(z0 + bz, Z)
                     y1 = min(y0 + by, Y)
                     x1 = min(x0 + bx, X)
-                    chunk = np.asarray(arr[z0:z1, y0:y1, x0:x1])
+                    chunk = np.asarray(arr[zb0:zb1, y0:y1, x0:x1])
 
                     # Sparse label volumes are mostly background; `.any()` is a cheap
                     # reduction, while np.unique below sorts the whole block.
@@ -165,7 +182,7 @@ def _scan_bboxes(path, key, block_shape=(64, 512, 512)):
                     ids = ids[ids != 0]
                     for mid in ids:
                         coords = np.argwhere(chunk == mid)
-                        gz = coords[:, 0] + z0
+                        gz = coords[:, 0] + zb0
                         gy = coords[:, 1] + y0
                         gx = coords[:, 2] + x0
                         vcounts[mid] = vcounts.get(mid, 0) + len(coords)
@@ -730,12 +747,21 @@ def _compute_mito_metrics_worker(task):
 
 
 def _aggregate_per_cell_lazy(
-    per_mito_df, cell_path, cell_key, vol_shape,
+    per_mito_df, cell_path, cell_key,
     voxel_size_nm, compute_surface, block_shape, cell_scale=(1, 1, 1),
-    compute_cell_surface=True,
+    compute_cell_surface=True, z_range=None,
 ):
-    """Build per-cell summary from per-mito results using lazy cell-label loading."""
-    cell_bboxes, cell_vcounts, cell_vol_shape = _scan_bboxes(cell_path, cell_key, block_shape)
+    """Build per-cell summary from per-mito results using lazy cell-label loading.
+
+    z_range is in mito/raw coordinates and is converted to cell coordinates here. It makes
+    the cell volume -- the denominator of every density -- count only in-window voxels, so
+    it matches the z-restricted mito list. A cell with no in-window voxel never enters
+    cell_vcounts and so drops out of the summary entirely.
+    """
+    cz = (None if z_range is None
+          else (z_range[0] // cell_scale[0], z_range[1] // cell_scale[0]))
+    cell_bboxes, cell_vcounts, cell_vol_shape = _scan_bboxes(
+        cell_path, cell_key, block_shape, z_range=cz)
 
     voxel_vol_um3  = None
     spacing_zyx_um = None
@@ -954,6 +980,7 @@ def main(args):
 
     all_mito_rows = []
     all_cell_rows = []
+    z_range_used = None   # provenance: the z-window this run was restricted to, if any
 
     for i, (raw_path, mito_path) in enumerate(
         tqdm(list(zip(raw_paths, mito_label_paths)), desc="Files")
@@ -972,13 +999,23 @@ def main(args):
         mito_ids = sorted(bboxes.keys())
         print(f"  Found {len(mito_ids)} objects.")
 
-        # Z-range filtering: keep only mitos whose bbox overlaps [z_start, z_end].
+        # Z-range restriction. Keep only mitos lying ENTIRELY inside [z_start, z_end]:
+        # an object crossing either face is dropped rather than measured truncated, so
+        # every surviving shape metric describes a complete object. The same window is
+        # applied to the axon volume below, so numerator and denominator agree.
+        #
+        # The mito scan above is deliberately NOT windowed: containment is tested against
+        # the object's true bbox, which a windowed scan would have clipped.
+        z_range = None
         if args.z_start is not None or args.z_end is not None:
-            z0 = args.z_start if args.z_start is not None else 0
-            z1 = args.z_end   if args.z_end   is not None else (vol_shape[0] - 1)
+            zlo = args.z_start if args.z_start is not None else 0
+            zhi = args.z_end   if args.z_end   is not None else (vol_shape[0] - 1)
+            z_range = (zlo, zhi)
             mito_ids = [mid for mid in mito_ids
-                        if bboxes[mid][0] <= z1 and bboxes[mid][1] >= z0]
-            print(f"  After z-range filter [{z0}, {z1}]: {len(mito_ids)} objects.")
+                        if bboxes[mid][0] >= zlo and bboxes[mid][1] <= zhi]
+            print(f"  After z-range filter [{zlo}, {zhi}]: {len(mito_ids)} objects "
+                  f"fully inside the window.")
+            z_range_used = z_range
 
         # Step 2: detect mito→raw scale (mito segmentation may be at coarser resolution).
         # Without raw, the mito volume itself defines the reference coordinate space.
@@ -1048,9 +1085,10 @@ def main(args):
             print("  Aggregating per-cell stats ...")
             cell_df = _aggregate_per_cell_lazy(
                 per_mito_df, cell_path, args.cell_key,
-                vol_shape, voxel_size_nm, compute_surface, block_shape,
+                voxel_size_nm, compute_surface, block_shape,
                 cell_scale=cell_scale,
                 compute_cell_surface=not args.no_cell_surface,
+                z_range=z_range,
             )
 
         per_mito_df.insert(0, "mito_file", os.path.basename(mito_path))
@@ -1075,11 +1113,26 @@ def main(args):
     out_mito_df.to_csv(mito_out, index=False)
     print(f"Wrote: {mito_out}  ({len(out_mito_df)} rows)")
 
+    def _tag_z_window(df):
+        """Record the z-window on a table whose numbers depend on it.
+
+        These two tables carry the cell volume -- the denominator of every density -- so
+        they must declare the window they were measured over. Absent columns therefore
+        mean an unrestricted run, which is exactly what the `full` variant is.
+        """
+        if z_range_used is not None and not df.empty:
+            zlo, zhi = z_range_used
+            z_nm = float(np.asarray(voxel_size_nm, dtype=float).ravel()[0])
+            df["z_start"] = zlo
+            df["z_end"] = zhi
+            df["z_window_um"] = round((zhi - zlo + 1) * z_nm * 1e-3, 4)
+        return df
+
     out_cell_df = pd.DataFrame()
     if all_cell_rows:
         cell_out = out_dir / "cell_summary_3d.csv"
         out_cell_df = pd.concat(all_cell_rows, ignore_index=True)
-        out_cell_df.to_csv(cell_out, index=False)
+        _tag_z_window(out_cell_df).to_csv(cell_out, index=False)
         print(f"Wrote: {cell_out}  ({len(out_cell_df)} rows)")
 
     # --- QC + cell-level summary ---
@@ -1115,7 +1168,7 @@ def main(args):
 
             cell_summary_df = _compute_cell_level_summary_df(merged_df, qc_cell_df)
             summary_out = out_dir / "cell_level_mito_summary.csv"
-            cell_summary_df.to_csv(summary_out, index=False)
+            _tag_z_window(cell_summary_df).to_csv(summary_out, index=False)
             print(f"Wrote: {summary_out}  ({len(cell_summary_df)} rows)")
 
 
@@ -1165,11 +1218,13 @@ if __name__ == "__main__":
     ap.add_argument("--skeleton", action="store_true",
                     help="Compute skeleton length (slow; branches/endpoints not yet implemented).")
     ap.add_argument("--z_start", "-zs", type=int, default=None,
-                    help="First z slice to include (0-indexed, inclusive). "
-                         "Mito objects whose bounding box doesn't overlap this range are skipped.")
+                    help="First z slice to include (0-indexed, inclusive). Restricts the "
+                         "whole analysis: only mitos lying entirely inside the window are "
+                         "kept, and the axon volume counts only in-window voxels.")
     ap.add_argument("--z_end", "-ze", type=int, default=None,
-                    help="Last z slice to include (0-indexed, inclusive). "
-                         "Mito objects whose bounding box doesn't overlap this range are skipped.")
+                    help="Last z slice to include (0-indexed, inclusive). Objects crossing "
+                         "either face are dropped, not truncated, so shape metrics always "
+                         "describe a complete object.")
     ap.add_argument("--cell_ids", "-cids", type=int, nargs="+", default=None,
                     help="Whitelist of cell/axon label IDs. Only mitos assigned to these "
                          "IDs (via the cell segmentation) are kept in the output.")

@@ -7,7 +7,7 @@ Writes into DATA_ROOT:
   mito_morphometrics_overview.csv   one row per animal (6)
   mito_morphometrics_per_axon.csv   long format, animal x axon x variant x object_set (120)
 
-and, for the two animals that also have an earlier automatically segmented run:
+and, for the two animals that also have an automatically segmented run:
   mito_morphometrics_auto_comparison.csv    animal x pipeline, as published (4)
   mito_morphometrics_auto_per_axon.csv      per axon per pipeline
   mito_morphometrics_auto_matched_mitos.csv manual mitos matched to their nearest automatic one
@@ -35,7 +35,7 @@ ANIMALS = {
 VARIANTS = ("full", "z25")
 SETS = {"all": "mito_morphometrics_3d.csv", "qc": "mito_morphometrics_3d_qc.csv"}
 
-# Animals that also have an earlier automatic run in <id>_morphometrics_final/:
+# Animals that also have an automatic run in <id>_morphometrics_auto_z25/:
 # 10 hand-picked axons over a 25 um z-window. animal -> (genotype, nominal z window)
 AUTO = {"4007": ("KO", (347, 1347)), "4010": ("WT", (252, 1252))}
 MATCH_TOL_UM = 0.5
@@ -69,21 +69,29 @@ for sid, (grp, model, has_raw) in ANIMALS.items():
     objs = pd.read_csv(f"{base}/{sid}_imod_objects.csv")
     axon_names = dict(zip(objs[objs.key == "axons"].label, objs[objs.key == "axons"].name))
 
-    # axon volumes come from the full run; identical in z25 (which is why its fractions break)
-    cells = pd.read_csv(f"{base}/{sid}_morphometrics_imod_full/cell_summary_3d.csv")
-    axon_vol = dict(zip(cells.label_id, cells.volume_um3))
-    total_axon_vol = float(cells.volume_um3.sum())
+    # Since the 2026-09 fix each variant measures its OWN axon volume -- z25 counts only
+    # in-window voxels -- so the denominator must be read per variant. Reading the full
+    # run's volumes for both is what used to bias every z25 density low.
+    full_cells = pd.read_csv(f"{base}/{sid}_morphometrics_imod_full/cell_summary_3d.csv")
+    z25_cells = pd.read_csv(f"{base}/{sid}_morphometrics_imod_z25/cell_summary_3d.csv")
 
     row = {
         "animal": sid, "genotype": grp, "source_model": model, "has_raw_em": has_raw,
         "voxel_z_nm": vz * 1000, "voxel_yx_nm": vy * 1000,
         "n_z_slices": n_z, "z_extent_um": round(n_z * vz, 2),
-        "n_axons": len(cells), "axon_volume_um3": total_axon_vol,
-        "z25_fractions_comparable": False,
+        # the two axon volumes are the two denominators, side by side: their ratio is how
+        # much of the traced axon lies outside the 25 um window
+        "n_axons": len(full_cells),
+        "axon_volume_um3": float(full_cells.volume_um3.sum()),
+        "axon_volume_um3_z25": float(z25_cells.volume_um3.sum()),
+        "z25_fractions_comparable": True,
     }
 
     for variant in VARIANTS:
         d = f"{base}/{sid}_morphometrics_imod_{variant}"
+        cells = full_cells if variant == "full" else z25_cells
+        axon_vol = dict(zip(cells.label_id, cells.volume_um3))
+        total_axon_vol = float(cells.volume_um3.sum())
         for setname, fname in SETS.items():
             mitos = pd.read_csv(f"{d}/{fname}")
             for k, v in summarise(mitos, total_axon_vol).items():
@@ -122,8 +130,8 @@ pa = pd.DataFrame(per_axon).sort_values(
 
 # column order: metadata, then metrics grouped by variant/set
 meta = ["animal", "genotype", "source_model", "has_raw_em", "voxel_z_nm", "voxel_yx_nm",
-        "n_z_slices", "z_extent_um", "n_axons", "axon_volume_um3", "z25_window",
-        "z25_fractions_comparable"]
+        "n_z_slices", "z_extent_um", "n_axons", "axon_volume_um3", "axon_volume_um3_z25",
+        "z25_window", "z25_fractions_comparable"]
 ordered = meta + [f"{m}_{v}_{s}" for v in VARIANTS for s in SETS for m in METRICS] \
     + [f"mito_volume_fraction_mean_of_axons_full_{s}" for s in SETS]
 ov = ov[ordered]
@@ -154,16 +162,17 @@ for label, col in (("volume fraction", "mito_volume_fraction_pooled_full_all"),
 # ---------------------------------------------------------------------------
 # Manual (IMOD) vs automatic segmentation, for the two animals that have both.
 #
-# The automatic run is the published one: 10 hand-picked axons, 25 um z-window.
-# Its axon set is NOT the manual 5 -- only 3 of 5 overlap in 4007 and 2 of 5 in
-# 4010 -- so the aggregate below compares each analysis as published and its
-# densities are not interchangeable. See mito_morphometrics_findings.md.
+# The automatic run is the re-run one: 10 hand-picked axons, 25 um z-window, numerator
+# and denominator both cropped to it. Its axon set is NOT the manual 5 -- only 3 of 5
+# overlap in 4007 and 1 of 5 in 4010 -- so the aggregate below compares each analysis as
+# published and its densities are not interchangeable. See mito_morphometrics_findings.md
+# for the biology and mito_morphometrics_zwindow_audit.md for why _final was superseded.
 # ---------------------------------------------------------------------------
 cmp_rows, cmp_axon, matched = [], [], []
 
 for sid, (grp, zwin) in AUTO.items():
     base = f"{DATA_ROOT}/{grp}/{sid}"
-    auto_dir = f"{base}/{sid}_morphometrics_final"
+    auto_dir = f"{base}/{sid}_morphometrics_auto_z25"
     if not os.path.exists(f"{auto_dir}/mito_morphometrics_3d.csv"):
         print(f"\n[skip] {sid}: no automatic run at {auto_dir}")
         continue
@@ -198,8 +207,9 @@ for sid, (grp, zwin) in AUTO.items():
             "median_elongation": rec["median_elongation"],
             "z_first": zf, "z_last": zl, "z_slices": zl - zf + 1,
             "z_extent_um": round((zl - zf + 1) * vz, 2),
-            # different axon sets + different z coverage + the automatic numerator is
-            # z-windowed while its denominator is full-extent
+            # The automatic run is now internally consistent (numerator and denominator
+            # share the 25 um window), but this table pairs it with the FULL manual run,
+            # so the two still differ in axon set and in z coverage.
             "density_comparable": False,
         })
 

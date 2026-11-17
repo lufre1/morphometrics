@@ -52,22 +52,31 @@ GROUP_LABELS = ["WT", r"$\mathit{Plp}^{-/y}$"]
 # ponytail: genotype lives only in the directory name -- none of the CSVs carry a
 # genotype column. If more samples arrive, promote this to a --genotype CLI mapping.
 SAMPLES = {
-    "4010_morphometrics_final": "WT",
-    "4007_morphometrics_final": "KO",
+    "4010_morphometrics_auto_z25": "WT",
+    "4007_morphometrics_auto_z25": "KO",
 }
 
-# Expected p-values per mode, used by --selfcheck. The "qc" column reproduces the
-# originally published figure 1; "raw" is what the default (aligned) mode gives.
+# Expected p-values per mode, used by --selfcheck.
+#
+# Refreshed 2026-09-16, when the automatic arm moved from *_morphometrics_final to
+# *_morphometrics_auto_z25 (mitos fully inside the z-window, axon volume cropped to the
+# same window). The superseded values, for reference:
+#   raw  F1A 0.734  F1B 0.076  F1C 0.064  F1D 0.345  F2A 0.121  F2B 0.345  F2C 0.002
+#        F2D 0.678  F2E 0.217  F2F 0.073
+#   qc   F1A 0.850  F1B 0.054  F1C 0.021  F1D 0.427  F2A 0.089  F2B 0.734  F2C 0.002
+#        F2D 0.734  F2E 0.390  F2F 0.035
+# The qc column used to reproduce the originally published figure 1; it no longer does,
+# because the published figure was built on the biased tables.
 EXPECTED_P = {
     "raw": {
-        "F1A": 0.734, "F1B": 0.076, "F1C": 0.064, "F1D": 0.345,
-        "F2A": 0.121, "F2B": 0.345, "F2C": 0.002, "F2D": 0.678,
-        "F2E": 0.217, "F2F": 0.073,
+        "F1A": 0.910, "F1B": 0.089, "F1C": 0.064, "F1D": 0.140,
+        "F2A": 0.054, "F2B": 0.273, "F2C": 0.001, "F2D": 0.385,
+        "F2E": 0.551, "F2F": 0.093,
     },
     "qc": {
-        "F1A": 0.850, "F1B": 0.054, "F1C": 0.021, "F1D": 0.427,
-        "F2A": 0.089, "F2B": 0.734, "F2C": 0.002, "F2D": 0.734,
-        "F2E": 0.390, "F2F": 0.035,
+        "F1A": 0.910, "F1B": 0.076, "F1C": 0.026, "F1D": 0.186,
+        "F2A": 0.026, "F2B": 0.307, "F2C": 0.001, "F2D": 0.385,
+        "F2E": 0.642, "F2F": 0.068,
     },
 }
 
@@ -142,7 +151,7 @@ FIG2_PANELS = [
 def _load_concat(data_dir, filename, samples=None):
     """Concatenate one CSV per sample, tagging each row with sample and genotype.
 
-    samples defaults to the module-level SAMPLES (the two *_morphometrics_final dirs);
+    samples defaults to the module-level SAMPLES (the two *_morphometrics_auto_z25 dirs);
     pass a different {directory: genotype} mapping to read another set of runs, e.g.
     the IMOD ones from figure_pipeline_forest.py.
     """
@@ -195,6 +204,9 @@ def build_axon_table(cell_df, mito_df):
     volumes = grp["volume_um3"].sum().reindex(out.index).fillna(0.0)
     out["median_mito_elongation"] = grp["elongation_a_over_c"].median()
     out["median_mito_flatness"] = grp["flatness_b_over_c"].median()
+    # Raw count, not just the density below: the manual-vs-automatic figure asks whether
+    # the two pipelines find the same number of mitochondria at all.
+    out["mito_count"] = counts
     # The figure y-axes are per 100 µm³ of axon.
     out["mito_count_density_per100"] = 100.0 * counts / out["cell_volume_um3"]
     out["mito_volume_density_per100"] = 100.0 * volumes / out["cell_volume_um3"]
@@ -220,10 +232,11 @@ def mwu(wt_vals, ko_vals):
 # PLOTTING
 # ------------------------------------------------------------
 
-def add_bracket(ax, x1, x2, y, h, text):
+def add_bracket(ax, x1, x2, y, h, text, fontsize=9):
     """Significance bracket with a numeric p-value label above it."""
     ax.plot([x1, x1, x2, x2], [y, y + h, y + h, y], lw=1.3, color="black")
-    ax.text((x1 + x2) / 2, y + h, text, ha="center", va="bottom", fontsize=9)
+    ax.annotate(text, ((x1 + x2) / 2, y + h), xytext=(0, 2), textcoords="offset points",
+                ha="center", va="bottom", fontsize=fontsize)
 
 
 def panel(ax, spec, axon_vals, mito_vals=None, test_vals=None, jitter_seed=0):
@@ -547,18 +560,20 @@ def main():
     os.makedirs(plot_dir, exist_ok=True)
     os.makedirs(table_dir, exist_ok=True)
 
+    suffix = "_qc" if args.qc else ""   # raw and QC runs must not overwrite each other
+
     outputs = []
     for fig, name in [(fig1, "figure1_axon_level"), (fig2, "figure2_mito_level")]:
-        path = os.path.join(plot_dir, f"{name}.pdf")
+        path = os.path.join(plot_dir, f"{name}{suffix}.pdf")
         fig.savefig(path, format="pdf", bbox_inches="tight")
         plt.close(fig)
         outputs.append(path)
 
-    stats_path = os.path.join(table_dir, "figures_3d_statistics.csv")
+    stats_path = os.path.join(table_dir, f"figures_3d_statistics{suffix}.csv")
     stats.drop(columns=["data_max", "ylim_top"]).to_csv(stats_path, index=False)
     outputs.append(stats_path)
 
-    legend_path = os.path.join(table_dir, "figure_legends.md")
+    legend_path = os.path.join(table_dir, f"figure_legends{suffix}.md")
     write_legends(stats, legend_path, "qc" if args.qc else "raw")
     outputs.append(legend_path)
 
