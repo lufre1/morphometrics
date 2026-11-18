@@ -6,7 +6,7 @@ the clipped start. That is exactly the kind of arithmetic where an off-by-one su
 silently and only shows up as a slightly wrong density after hours of recompute, so it gets
 a check that runs in a second.
 
-    micromamba run -n synapse python test_zrange.py
+    micromamba run -n mito-morphometrics python test_zrange.py
 """
 
 import numpy as np

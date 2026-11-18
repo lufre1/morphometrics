@@ -222,7 +222,7 @@ the matched-mitochondria numbers.
 ## Reproducing this audit
 
 ```bash
-mamba activate synapse
+micromamba activate mito-morphometrics
 ./run_morphometrics_auto.sh                 # ONLY=4007 to run one animal
 python aggregate_overview.py
 python figures_3d.py            ; python figures_3d.py --qc

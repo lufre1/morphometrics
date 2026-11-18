@@ -67,7 +67,7 @@ from skimage.transform import resize as sk_resize
 from tifffile import imread
 from tqdm import tqdm
 
-import synapse.util as util
+from morphometrics_2d import get_file_paths
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +78,7 @@ def _find_paths(search_dir, ext):
     """Return sorted list of paths matching *ext* under *search_dir*.
 
     For '.zarr': finds directories ending in '.zarr' (Zarr stores are dirs).
-    For all other extensions: delegates to util.get_file_paths.
+    For all other extensions: delegates to get_file_paths (morphometrics_2d).
     """
     ext = ext if ext.startswith(".") else f".{ext}"
     # If the path itself is a Zarr store (any *.zarr / *.ome.zarr directory),
@@ -88,7 +88,7 @@ def _find_paths(search_dir, ext):
     if ext.lower() == ".zarr":
         candidates = glob(os.path.join(search_dir, "**", "*.zarr"), recursive=True)
         return sorted(p for p in candidates if os.path.isdir(p))
-    return util.get_file_paths(search_dir, ext)
+    return get_file_paths(search_dir, ext)
 
 
 def _load_volume(path, key):

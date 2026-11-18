@@ -6,19 +6,15 @@ manual IMOD tracing vs automatic CNN segmentation).
 
 ## Environment
 
-`env.yaml` only covers `morphometrics_2d.py`:
+One env covers everything: 2D and 3D morphometrics, figures and stats scripts.
 
 ```bash
-conda env create -f env.yaml
-conda activate mito-morphometrics
+micromamba create -f env.yaml        # or: conda env create -f env.yaml
+micromamba activate mito-morphometrics
 ```
 
-Everything else (3D pipeline, figures, stats) runs in the `synapse` env, which additionally
-provides `zarr`, `scipy`, `matplotlib`, `statsmodels`, `Pillow`, `napari` and `synapse.util`:
-
-```bash
-mamba activate synapse
-```
+`zarr` is pinned to v2 (the code uses the v2 API). `inspect_overlap_napari.py` additionally
+needs `micromamba install -n mito-morphometrics napari pyqt`.
 
 ## Morphometrics
 

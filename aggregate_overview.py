@@ -12,7 +12,7 @@ and, for the two animals that also have an automatically segmented run:
   mito_morphometrics_auto_per_axon.csv      per axon per pipeline
   mito_morphometrics_auto_matched_mitos.csv manual mitos matched to their nearest automatic one
 
-Run inside `mamba activate synapse`.
+Run inside `micromamba activate mito-morphometrics` (env.yaml).
 """
 import os
 

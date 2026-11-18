@@ -25,7 +25,7 @@
 #
 # Set ONLY to run one animal, e.g. ONLY=4007 ./run_morphometrics_auto.sh
 #
-# Run inside `mamba activate synapse` (the repo's own env.yaml lacks zarr/scipy/synapse).
+# Run inside the repo env: `micromamba activate mito-morphometrics` (see env.yaml).
 set -euo pipefail
 
 R=/home/freckmann15/data/volume-em
